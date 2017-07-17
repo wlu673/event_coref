@@ -1,14 +1,15 @@
 from collections import defaultdict
 import numpy as np
 import cPickle
-import random
 
 
 def build_data(src_dir, corpus_type, window):
     corpora = {}
-    max_inst_in_doc = -1
-    max_cluster_in_doc = -1
-    max_sent_length = -1
+    max_lengths = {'sentence': -1,
+                   'instance': -1,
+                   'cluster': -1,
+                   'possible_types': -1,
+                   'dep': -1}
     vocab = defaultdict(int)
     counters = {'sent_length': defaultdict(int),
                 'num_of_inst': defaultdict(lambda: defaultdict(int)),
@@ -35,23 +36,25 @@ def build_data(src_dir, corpus_type, window):
     cluster_in_doc = 0
     for type_ in corpus_type:
         corpora[type_] = {}
-        print 'processing %s data' % type_
+        print 'Processing %s data' % type_
         with open(src_dir + '/raw/sample/' + type_ + '.txt', 'r') as fin:
             for line in fin:
                 line = line.strip()
 
                 if line.startswith('#BeginOfDocument'):
                     current_doc = line[(line.find(' ') + 1):]
-                    corpora[type_][current_doc] = {'instances': [], 'coreference': [], 'event_id': []}
+                    corpora[type_][current_doc] = {'instances': [], 'coreference': [], 'inst_id_to_index': {}}
                     continue
 
                 if line == '#EndOfDocument':
                     counters['num_of_inst'][type_][inst_in_doc] += 1
-                    if max_inst_in_doc < inst_in_doc:
-                        max_inst_in_doc = inst_in_doc
+                    if max_lengths['instance'] < inst_in_doc:
+                        max_lengths['instance'] = inst_in_doc
                     counters['num_of_cluster'][type_][cluster_in_doc] += 1
-                    if max_cluster_in_doc < cluster_in_doc:
-                        max_cluster_in_doc = cluster_in_doc
+                    if max_lengths['cluster'] < cluster_in_doc:
+                        max_lengths['cluster'] = cluster_in_doc
+
+                    corpora[type_][current_doc]['coreference'] = sorted(corpora[type_][current_doc]['coreference'])
 
                     current_doc = ''
                     sent_id = -1
@@ -66,21 +69,21 @@ def build_data(src_dir, corpus_type, window):
                     sent_id += 1
                     sent_length = len(current_sent['word'])
                     counters['sent_length'][sent_length] += 1
-                    if sent_length > max_sent_length:
-                        max_sent_length = sent_length
+                    if sent_length > max_lengths['sentence']:
+                        max_lengths['sentence'] = sent_length
                     for anchor_index in range(len(current_sent['eventId'])):
                         event_id = current_sent['eventId'][anchor_index]
                         if not event_id == 'NONE':
                             inst = parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id)
                             corpora[type_][current_doc]['instances'] += [inst]
-                            corpora[type_][current_doc]['event_id'] += [event_id]
-                            update_counters(type_, inst, counters)
+                            update_counters(type_, inst, counters, max_lengths)
                             inst_in_doc += 1
+                            corpora[type_][current_doc]['inst_id_to_index'][event_id] = inst_in_doc
                     current_sent = defaultdict(list)
                     continue
 
                 if line.startswith('@Coreference'):
-                    chain = parse_coreference(line)
+                    chain = parse_coreference(line, corpora[type_][current_doc]['inst_id_to_index'])
                     if chain == 'Error':
                         print 'Incorrect coreference format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                         exit(0)
@@ -92,9 +95,9 @@ def build_data(src_dir, corpus_type, window):
                     print 'Incorrect line format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                     exit(0)
 
-    write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_inst_in_doc, max_cluster_in_doc, max_sent_length)
+    write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths)
 
-    return max_inst_in_doc, max_cluster_in_doc, corpora, map_fea_to_index, vocab
+    return max_lengths, corpora, map_fea_to_index, vocab
 
 
 def parse_line(line, current_sent, fea_placeholder, map_fea_to_index, vocab):
@@ -218,7 +221,7 @@ def parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id):
     return inst
 
 
-def update_counters(type_, inst, counters):
+def update_counters(type_, inst, counters, max_lengths):
     event_type = inst['type']
     event_subtype = inst['subtype']
     event_realis = inst['realis']
@@ -227,18 +230,27 @@ def update_counters(type_, inst, counters):
     counters['subtype'][type_][event_subtype] += 1
     counters['realis'][type_][event_realis] += 1
 
+    max_possible_types = max([len(item) for item in inst['possibleTypes']])
+    if max_possible_types > max_lengths['possible_types']:
+        max_lengths['possible_types'] = max_possible_types
+    max_dep = max([len(item) for item in inst['dep']])
+    if max_dep > max_lengths['dep']:
+        max_lengths['dep'] = max_dep
 
-def parse_coreference(line):
+
+def parse_coreference(line, inst_id_to_index):
     entries = line.split('\t')
 
     if len(entries) != 3:
         return 'Error'
 
-    chain = entries[2].split(',')
-    return chain
+    chain = []
+    for event_id in entries[2].split(','):
+        chain += [inst_id_to_index[event_id]]
+    return sorted(chain)
 
 
-def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_inst_in_doc, max_cluster_in_doc, max_sent_length):
+def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
     with open(src_dir + '/' + 'statistics.txt', 'w') as fout:
         header_width = 60
         print >> fout, '\n', 'Stats'.center(header_width, '='), '\n'
@@ -248,7 +260,7 @@ def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_inst_in_do
             print >> fout, counters['num_of_inst'][type_]
             print >> fout, 'Total: ', sum(counters['num_of_inst'][type_].keys())
         print >> fout, '-' * header_width
-        print >> fout, 'Max number of instances in one doc: ', max_inst_in_doc
+        print >> fout, 'Max number of instances in one doc: ', max_lengths['instance']
         print >> fout, '\n', '=' * header_width, '\n'
         print >> fout, 'Distribution of number of clusters in the corpora:'
         for type_ in corpus_type:
@@ -256,12 +268,12 @@ def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_inst_in_do
             print >> fout, counters['num_of_cluster'][type_]
             print >> fout, 'Total: ', sum(counters['num_of_cluster'][type_].keys())
         print >> fout, '-' * header_width
-        print >> fout, 'Max number of clusters in one doc: ', max_cluster_in_doc
+        print >> fout, 'Max number of clusters in one doc: ', max_lengths['cluster']
         print >> fout, '\n', '=' * header_width, '\n'
         print >> fout, 'Distribution of sentence lengths in the corpora:'
         print >> fout, counters['sent_length']
         print >> fout, '-' * header_width
-        print >> fout, 'Max length of a sentence: ', max_sent_length
+        print >> fout, 'Max length of a sentence: ', max_lengths['sentence']
         print >> fout, '\n', '=' * header_width, '\n'
 
         def print_feature_stats(fea):
@@ -381,12 +393,11 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         create_embedding(fea)
 
     for fea in map_fea_to_index:
-        print 'Size of ', fea, ': ', len(map_fea_to_index[fea])
+        print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
 def main():
     np.random.seed(8989)
-    random.seed(8989)
 
     w2v_file = 'GoogleNews-vectors-negative300.bin'
     src_dir = '/scratch/wl1191/event_coref/data'
@@ -394,7 +405,7 @@ def main():
     window = 31
 
     print "\nLoading data..."
-    max_inst_in_doc, max_cluster_in_doc, corpora, map_fea_to_index, vocab = build_data(src_dir, corpus_type, window)
+    max_lengths, corpora, map_fea_to_index, vocab = build_data(src_dir, corpus_type, window)
     print "Data loaded!"
 
     W_trained, word_index_map, W_random = create_word_embeddings(src_dir, w2v_file, vocab)
@@ -404,8 +415,9 @@ def main():
     create_feature_embeddings(map_fea_to_index, embeddings, window)
 
     print 'Dumping ...'
-    cPickle.dump([max_inst_in_doc, max_cluster_in_doc, corpora, embeddings, map_fea_to_index],
+    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index],
                  open(src_dir + '/' + 'nugget.pkl', 'wb'))
+    cPickle.dump([max_lengths, corpora], open(src_dir + '/' + 'corpora.pkl', 'wb'))
     print 'Dataset created!'
 
 
