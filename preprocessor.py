@@ -77,8 +77,8 @@ def build_data(src_dir, corpus_type, window):
                             inst = parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id)
                             corpora[type_][current_doc]['instances'] += [inst]
                             update_counters(type_, inst, counters, max_lengths)
-                            inst_in_doc += 1
                             corpora[type_][current_doc]['inst_id_to_index'][event_id] = inst_in_doc
+                            inst_in_doc += 1
                     current_sent = defaultdict(list)
                     continue
 

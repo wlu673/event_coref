@@ -3,6 +3,9 @@ import numpy as np
 import cPickle
 
 
+np.set_printoptions(threshold=np.nan)
+
+
 def prepare_word_embeddings(with_word_embs, embeddings):
     if not with_word_embs:
         word_vecs = embeddings['word_random']
@@ -46,7 +49,7 @@ def get_dim_mapping(embeddings, map_fea_to_index, features):
     return map_binary_dim
 
 
-def prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, map_binary_dim):
+def prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, map_binary_dim, alphas):
     data_sets = {}
     for corpus in corpora:
         data_sets[corpus] = []
@@ -63,10 +66,21 @@ def prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, m
             for i in range(num_placeholder):
                 add_instance_placeholder(data_doc, features, map_fea_to_index, map_binary_dim, window)
 
-            process_cluster(data_doc, max_lengths, corpora[corpus][doc]['coreference'])
+            prev_inst = [0] + [-1] * (max_lengths['instance'] - 1)
+            mask_prev_inst = [0] * max_lengths['instance']
+            for i in range(1, len(inst_in_doc)):
+                data_doc['prev_inst'] += [prev_inst[:]]
+                data_doc['mask_prev_inst'] += [mask_prev_inst[:]]
+                prev_inst[i - 1] = i
+                prev_inst[i] = 0
+                mask_prev_inst[i - 1] = 1
+            data_doc['prev_inst'] += [prev_inst[:]] + [[-1] * max_lengths['instance']] * num_placeholder
+            data_doc['mask_prev_inst'] += [mask_prev_inst[:]] + [[0] * max_lengths['instance']] * num_placeholder
 
-            data_doc['id'] = doc
-            data_doc['event_id'] = corpora[corpus][doc]['event_id']
+            process_cluster(data_doc, max_lengths, corpora[corpus][doc]['coreference'], len(inst_in_doc), num_placeholder, alphas)
+
+            data_doc['doc_id'] = doc
+            data_doc['inst_id_to_index'] = corpora[corpus][doc]['inst_id_to_index']
             data_sets[corpus] += [data_doc]
 
     return data_sets
@@ -110,7 +124,6 @@ def add_instance(data_doc, inst, map_fea_to_index, features, map_binary_dim):
 
     for fea in data_inst:
         data_doc[fea] += [data_inst[fea]]
-    data_doc['binaryFeatures'] += [inst['binaryFeatures']]
 
     return True
 
@@ -143,11 +156,67 @@ def add_instance_placeholder(data_doc, features, map_fea_to_index, map_binary_di
 
     for fea in data_inst:
         data_doc[fea] += [data_inst[fea]]
-    data_doc['binaryFeatures'] += [[]]
 
 
-def process_cluster(data_doc, max_lengths, coref):
-    pass
+def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alphas):
+    map_inst_to_cluster = {}
+    cluster_offset = 0
+    current_hv = [0] * len(coref) + [-1] * (max_lengths['cluster'] - len(coref))
+    inst_init = [0] * num_inst
+    index = 0
+    for chain in coref:
+        inst_init[chain[0]] = 1
+        for inst in chain:
+            map_inst_to_cluster[inst] = index
+
+        data_doc['cluster'] += chain
+        mask = [0] + [1] * (len(chain) - 1)
+        data_doc['mask_rnn'] += mask
+
+        current_hv[index] = cluster_offset
+        cluster_offset += len(chain)
+        index += 1
+
+    for i in range(num_inst):
+        data_doc['current_hv'] += [current_hv[:]]
+        current_hv[map_inst_to_cluster[i]] += 1
+    mask_current_hv = [[1] * len(coref) + [0] * (max_lengths['cluster'] - len(coref))] * num_inst
+
+    prev_inst_cluster = [0] + [-1] * (max_lengths['instance'] - 1)
+    for i in range(1, num_inst):
+        data_doc['prev_inst_cluster'] += [prev_inst_cluster[:]]
+        prev_inst_cluster[i] = 0
+        prev_inst_cluster[i - 1] = map_inst_to_cluster[i - 1] + 1
+    data_doc['prev_inst_cluster'] += [prev_inst_cluster[:]]
+
+    data_doc['prev_inst_cluster_gold'] = np.array([[-1] * max_lengths['instance']] * max_lengths['instance'], dtype='int32')
+    for inst_curr in range(num_inst):
+        chain = coref[map_inst_to_cluster[inst_curr]]
+        for inst_prev in chain:
+            if inst_prev > inst_curr:
+                break
+            data_doc['prev_inst_cluster_gold'][inst_curr][inst_prev] = inst_prev
+
+    data_doc['cluster'] += [-1] * num_placeholder
+    data_doc['mask_rnn'] += [0] * num_placeholder
+    data_doc['mask_cluster'] = [1] * num_inst + [0] * num_placeholder
+    data_doc['current_hv'] += [[-1] * max_lengths['cluster']] * num_placeholder
+    data_doc['mask_current_hv'] = mask_current_hv + [[0] * max_lengths['cluster']] * num_placeholder
+    data_doc['prev_inst_cluster'] += [[0] * max_lengths['instance']] * (max_lengths['instance'] - num_inst)
+
+    data_doc['alpha'] = get_penalty_rates(inst_init, max_lengths, alphas)
+
+
+def get_penalty_rates(inst_init, max_lengths, alphas):
+    penalty_rates = np.array([[-np.inf] * max_lengths['instance']] * len(inst_init), dtype='float32')
+    for i in range(len(inst_init)):
+        if inst_init[i] == 1:
+            penalty_rates[i, i] = 0
+            penalty_rates[i, 0:i] = alphas[0]
+        else:
+            penalty_rates[i, i] = alphas[1]
+            penalty_rates[i, 0:i] = alphas[2]
+    return penalty_rates
 
 
 def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
@@ -161,6 +230,7 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('title', -1),
                                         ('eligible', -1)]),
          with_word_embs=True,
+         alphas=(0.5, 1.2, 1),
          batch=2):
 
     print 'Loading dataset:', dataset_path, '...'
@@ -169,5 +239,10 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     prepare_word_embeddings(with_word_embs, embeddings)
     features = prepare_features(expected_features)
     map_binary_dim = get_dim_mapping(embeddings, map_fea_to_index, features)
-    prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, map_binary_dim)
+    data_sets = prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, map_binary_dim, alphas)
+    print data_sets['train'][0]['alpha']
+    print corpora['train'][data_sets['train'][0]['doc_id']]['coreference']
 
+
+if __name__ == '__main__':
+    main()
