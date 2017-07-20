@@ -221,6 +221,8 @@ def get_penalty_rates(inst_init, max_lengths, alphas):
 
 def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
          window=31,
+         model='non_consecutive_cnn',
+         wed_window=2,
          expected_features=OrderedDict([('anchor', 0),
                                         ('pos', -1),
                                         ('chunk', -1),
@@ -230,6 +232,10 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('title', -1),
                                         ('eligible', -1)]),
          with_word_embs=True,
+         update_embs=True,
+         dropout=0.5,
+         lr=0.01,
+         norm_lim=9.0,
          alphas=(0.5, 1.2, 1),
          batch=2):
 
