@@ -49,7 +49,7 @@ def get_dim_mapping(embeddings, map_fea_to_index, features):
     return map_binary_dim
 
 
-def prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, map_binary_dim, alphas):
+def prepare_data(max_lengths, corpora, map_fea_to_index, features, map_binary_dim, alphas):
     data_sets = {}
     for corpus in corpora:
         data_sets[corpus] = []
@@ -124,6 +124,7 @@ def add_instance(data_doc, inst, map_fea_to_index, features, map_binary_dim):
 
     for fea in data_inst:
         data_doc[fea] += [data_inst[fea]]
+    data_doc['anchor_position'] += [inst['anchor']]
 
     return True
 
@@ -156,6 +157,7 @@ def add_instance_placeholder(data_doc, features, map_fea_to_index, map_binary_di
 
     for fea in data_inst:
         data_doc[fea] += [data_inst[fea]]
+    data_doc['anchor_position'] += [0]
 
 
 def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alphas):
@@ -245,9 +247,11 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     prepare_word_embeddings(with_word_embs, embeddings)
     features = prepare_features(expected_features)
     map_binary_dim = get_dim_mapping(embeddings, map_fea_to_index, features)
-    data_sets = prepare_data(max_lengths, corpora, embeddings, map_fea_to_index, features, map_binary_dim, alphas)
-    print data_sets['train'][0]['alpha']
-    print corpora['train'][data_sets['train'][0]['doc_id']]['coreference']
+    data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, map_binary_dim, alphas)
+    ap = data_sets['train'][0]['anchor_position']
+    print ap
+    print len(ap)
+    print max_lengths['instance']
 
 
 if __name__ == '__main__':

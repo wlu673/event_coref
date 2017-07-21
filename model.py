@@ -1,9 +1,10 @@
+import theano, theano.tensor as T, theano.tensor.shared_randomstreams
 from collections import OrderedDict
-import theano, theano.tensor as T
 import numpy as np
 
 
-########################## Optimization Functions ##########################
+###########################################################################
+# Optimization Functions
 
 def adadelta(inputs, cost, names, parameters, gradients, lr, norm_lim, rho=0.95, eps=1e-6):
     zipped_grads = [theano.shared(p.get_value() * np.float32(0.), name='%s_grad' % k)
@@ -61,8 +62,8 @@ def clip_gradient(updates, norm, names):
     return res
 
 
-################################## Models #################################
-
+###########################################################################
+# Nonconsecutive CNN
 
 def non_consecutive_cnn(model):
     X = get_concatenation(model.container['embeddings'],
@@ -72,7 +73,7 @@ def non_consecutive_cnn(model):
 
     rep_cnn = non_consecutive_cnn_driver(X,
                                          model.args['cnn_filter_num'],
-                                         model.args['cnn_filter_win'],
+                                         model.args['cnn_filter_wins'],
                                          model.args['batch'],
                                          model.args['window'],
                                          model.container['fea_dim'],
@@ -80,7 +81,7 @@ def non_consecutive_cnn(model):
                                          model.container['params'],
                                          model.container['names'])
 
-    dim_cnn = model.args['cnn_filter_num'] * len(model.args['cnn_filter_win'])
+    dim_cnn = model.args['cnn_filter_num'] * len(model.args['cnn_filter_wins'])
 
     return rep_cnn, dim_cnn
 
@@ -105,40 +106,40 @@ def get_concatenation(embeddings, vars, features, transpose=False):
     return X
 
 
-def non_consecutive_cnn_driver(inputs, feature_map, cnn_windows, batch, length, dim, prefix, params, names):
+def non_consecutive_cnn_driver(inputs, filter_num, filter_wins, batch, length, dim, prefix, params, names):
     X = inputs.dimshuffle(1, 0, 2)
     reps = []
-    for win in cnn_windows:
-        Ws, b = prepare_params(win, feature_map, length, dim, prefix, params, names)
-        rep_one = eval('non_consecutive_cnn_layer' + str(win))(X, feature_map, batch, Ws, b)
+    for win in filter_wins:
+        Ws, b = prepare_params(win, filter_num, length, dim, prefix, params, names)
+        rep_one = eval('non_consecutive_cnn_layer' + str(win))(X, filter_num, batch, Ws, b)
         reps += [rep_one]
 
     rep_cnn = T.cast(T.concatenate(reps, axis=1), dtype=theano.config.floatX)
     return rep_cnn
 
 
-def prepare_params(window, feature_map, length, dim, prefix, params, names):
+def prepare_params(window, filter_num, length, dim, prefix, params, names):
     fan_in = window * dim
-    fan_out = feature_map * window * dim / length  # (length - window + 1)
+    fan_out = filter_num * window * dim / length  # (length - window + 1)
     bound = np.sqrt(6. / (fan_in + fan_out))
 
     Ws = []
     for i in range(window):
         W = theano.shared(np.random.uniform(low=-bound,
                                             high=bound,
-                                            size=(dim, feature_map)).astype(theano.config.floatX))
+                                            size=(dim, filter_num)).astype(theano.config.floatX))
         Ws += [W]
         params += [W]
         names += [prefix + '_W_win' + str(window) + '_' + str(i)]
 
-    b = theano.shared(np.zeros(feature_map, dtype=theano.config.floatX))
+    b = theano.shared(np.zeros(filter_num, dtype=theano.config.floatX))
     params += [b]
     names += [prefix + '_b_win_' + str(window)]
 
     return Ws, b
 
 
-def non_consecutive_cnn_layer2(inputs, feature_map, batch, Ws, b):
+def non_consecutive_cnn_layer2(inputs, filter_num, batch, Ws, b):
     def recurrence(_x, i_m1, i_m2):
         ati = T.dot(_x, Ws[0])
         _m1 = T.maximum(i_m1, ati)
@@ -147,15 +148,15 @@ def non_consecutive_cnn_layer2(inputs, feature_map, batch, Ws, b):
         return [_m1, _m2]
 
     ret, _ = theano.scan(fn=recurrence,
-                        sequences=[inputs],
-                        outputs_info=[T.alloc(0., batch, feature_map), T.alloc(0., batch, feature_map)],
-                        n_steps=inputs.shape[0])
+                         sequences=[inputs],
+                         outputs_info=[T.alloc(0., batch, filter_num), T.alloc(0., batch, filter_num)],
+                         n_steps=inputs.shape[0])
 
     rep = T.tanh(ret[1][-1] + b[np.newaxis, :])
     return rep
 
 
-def non_consecutive_cnn_layer3(inputs, feature_map, batch, Ws, b):
+def non_consecutive_cnn_layer3(inputs, filter_num, batch, Ws, b):
     def recurrence(_x, i_m1, i_m2, i_m3):
         ati = T.dot(_x, Ws[0])
         _m1 = T.maximum(i_m1, ati)
@@ -166,17 +167,127 @@ def non_consecutive_cnn_layer3(inputs, feature_map, batch, Ws, b):
         return [_m1, _m2, _m3]
 
     ret, _ = theano.scan(fn=recurrence,
-                        sequences=[inputs],
-                        outputs_info=[T.alloc(0., batch, feature_map),
-                                      T.alloc(0., batch, feature_map),
-                                      T.alloc(0., batch, feature_map)],
-                        n_steps=inputs.shape[0])
+                         sequences=[inputs],
+                         outputs_info=[T.alloc(0., batch, filter_num), T.alloc(0., batch, filter_num),
+                                       T.alloc(0., batch, filter_num)],
+                         n_steps=inputs.shape[0])
 
     rep = T.tanh(ret[2][-1] + b[np.newaxis, :])
     return rep
 
 
+def non_consecutive_cnn_layer4(inputs, filter_num, batch, Ws, b):
+    def recurrence(_x, i_m1, i_m2, i_m3, i_m4):
+        ati = T.dot(_x, Ws[0])
+        _m1 = T.maximum(i_m1, ati)
+        ati = i_m1 + T.dot(_x, Ws[1])
+        _m2 = T.maximum(i_m2, ati)
+        ati = i_m2 + T.dot(_x, Ws[2])
+        _m3 = T.maximum(i_m3, ati)
+        ati = i_m3 + T.dot(_x, Ws[3])
+        _m4 = T.maximum(i_m4, ati)
+        return [_m1, _m2, _m3, _m4]
+
+    ret, _ = theano.scan(fn=recurrence,
+                         sequences=[inputs],
+                         outputs_info=[T.alloc(0., batch, filter_num), T.alloc(0., batch, filter_num),
+                                       T.alloc(0., batch, filter_num), T.alloc(0., batch, filter_num)],
+                         n_steps=inputs.shape[0])
+
+    rep = T.tanh(ret[3][-1] + b[np.newaxis, :])
+    return rep
+
+
+def non_consecutive_cnn_layer5(inputs, filter_num, batch, Ws, b):
+    def recurrence(_x, i_m1, i_m2, i_m3, i_m4, i_m5):
+        ati = T.dot(_x, Ws[0])
+        _m1 = T.maximum(i_m1, ati)
+        ati = i_m1 + T.dot(_x, Ws[1])
+        _m2 = T.maximum(i_m2, ati)
+        ati = i_m2 + T.dot(_x, Ws[2])
+        _m3 = T.maximum(i_m3, ati)
+        ati = i_m3 + T.dot(_x, Ws[3])
+        _m4 = T.maximum(i_m4, ati)
+        ati = i_m4 + T.dot(_x, Ws[4])
+        _m5 = T.maximum(i_m5, ati)
+        return [_m1, _m2, _m3, _m4, _m5]
+
+    ret, _ = theano.scan(fn=recurrence,
+                         sequences=[inputs],
+                         outputs_info=[T.alloc(0., batch, filter_num), T.alloc(0., batch, filter_num),
+                                       T.alloc(0., batch, filter_num), T.alloc(0., batch, filter_num),
+                                       T.alloc(0., batch, filter_num)],
+                         n_steps=inputs.shape[0])
+
+    rep = T.tanh(ret[4][-1] + b[np.newaxis, :])
+    return rep
+
+
 ###########################################################################
+# Multi-Hidden Layer NN
+
+def multi_hidden_layers(inputs, dim_hids, params, names, prefix):
+    hidden_vector = inputs
+    index = 0
+    for dim_in, dim_out in zip(dim_hids, dim_hids[1:]):
+        index += 1
+        hidden_vector = hidden_layer(hidden_vector, dim_in, dim_out, params, names, prefix + '_layer' + str(index),)
+    return hidden_vector
+
+
+def hidden_layer(inputs, dim_in, dim_out, params, names, prefix):
+    bound = np.sqrt(6. / (dim_in + dim_out))
+    W = theano.shared(np.random.uniform(low=-bound, high=bound, size=(dim_in, dim_out)).astype(theano.config.floatX))
+    b = theano.shared(np.zeros(dim_out, dtype=theano.config.floatX))
+    res = []
+    for x in inputs:
+        out = T.nnet.sigmoid(T.dot(x, W) + b)
+        res += [out]
+
+    params += [W, b]
+    names += [prefix + '_W', prefix + '_b']
+
+    return res
+
+
+###########################################################################
+# Model Utilities
+
+def trigger_contexts(model):
+    wed_window = model.args['wed_window']
+    extended_words = model.container['vars']['word']
+    padding = T.zeros((extended_words.shape[0], wed_window), dtype='int32')
+    extended_words = T.cast(T.concatenate([padding, extended_words, padding], axis=1), dtype='int32')
+
+    def recurrence(words, position, emb):
+        indices = words[position:(position + 2 * wed_window + 1)]
+        rep = emb[indices].flatten()
+        return [rep]
+
+    rep_contexts, _ = theano.scan(fn=recurrence,
+                                  sequences=[extended_words, model.container['anchor_position']],
+                                  n_steps=extended_words.shape[0],
+                                  non_sequences=[model.container['embeddings']['word']],
+                                  outputs_info=[None])
+
+    dim_contexts = (2 * wed_window + 1) * model.args['embeddings']['word'].shape[1]
+    return rep_contexts, dim_contexts
+
+
+def dropout_from_layer(rng, layers, p):
+    srng = theano.tensor.shared_randomstreams.RandomStreams(rng.randint(999999))
+    # p = 1-p because 1's indicate keep and p is prob of dropping
+    res = []
+    for layer in layers:
+        mask = srng.binomial(n=1, p=1-p, size=layer.shape)
+        # The cast is important because int * float32 = float64 which pulls things off the gpu
+        output = layer * T.cast(mask, theano.config.floatX)
+        res += [output]
+    return res
+
+
+###########################################################################
+
 
 
 class BaseModel(object):
@@ -194,15 +305,16 @@ class BaseModel(object):
 
         self.prepare_features()
 
-        self.container['cluster'] = T.lvector('cluster')
-        self.container['mask_rnn'] = T.lvector('mask_rnn')
-        self.container['current_hv'] = T.lmatrix('current_hv')
-        self.container['prev_inst'] = T.lmatrix('prev_inst')
-        self.container['row_indices'] = T.lmatrix('row_indices')
-        self.container['prev_inst_cluster'] = T.lmatrix('prev_inst_cluster')
-        self.container['prev_inst_cluster_gold'] = T.lmatrix('prev_inst_cluster_gold')
+        self.container['cluster'] = T.ivector('cluster')
+        self.container['mask_rnn'] = T.ivector('mask_rnn')
+        self.container['current_hv'] = T.imatrix('current_hv')
+        self.container['prev_inst'] = T.imatrix('prev_inst')
+        self.container['row_indices'] = T.imatrix('row_indices')
+        self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
+        self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
         self.container['alphas'] = T.matrix('alphas')
-
+        
+        self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['lr'] = T.scalar('lr')
         self.container['zero_vector'] = T.vector('zero_vector')
 
@@ -271,39 +383,30 @@ class BaseModel(object):
 class MainModel(BaseModel):
     def __init__(self, args):
         BaseModel.__init__(self, args)
+        rep_cnn, rep_cnn_dropout, dim_cnn = self.get_cnn_rep()
 
-        X, _ = non_consecutive_cnn(self)
-
+        X = rep_cnn
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['anchor_position']]
         self.F = theano.function(inputs=inputs, outputs=X, on_unused_input='warn')
 
-        # if self.args['wedWindow'] > 0:
-        #     rep, dim_rep = localWordEmbeddingsTrigger(self)
-        #     fetre = T.concatenate([fetre, rep], axis=1)
-        #     dim_inter += dim_rep
-        #
-        # fetre_dropout = _dropout_from_layer(self.args['rng'], [fetre], self.args['dropout'])
-        # fetre_dropout = fetre_dropout[0]
-        #
-        # hids = [dim_inter] + self.args['multilayerNN1']
-        #
-        # mul = MultiHiddenLayers([fetre, fetre_dropout], hids, self.container['params'], self.container['names'],
-        #                         'multiMainModel', kGivens=self.args['kGivens'])
-        #
-        # fetre, fetre_dropout = mul[0], mul[1]
-        #
-        # dim_inter = hids[len(hids) - 1]
-        #
-        # fW = theano.shared(
-        #     createMatrix(randomMatrix(dim_inter, self.args['nc']), self.args['kGivens'], 'sofmaxMainModel_W'))
-        # fb = theano.shared(createMatrix(numpy.zeros(self.args['nc'], dtype=theano.config.floatX), self.args['kGivens'],
-        #                                 'sofmaxMainModel_b'))
-        #
-        # self.container['params'] += [fW, fb]
-        # self.container['names'] += ['sofmaxMainModel_W', 'sofmaxMainModel_b']
-        #
-        # p_y_given_x_dropout = T.nnet.softmax(T.dot(fetre_dropout, fW) + fb)
-        #
-        # p_y_given_x = T.nnet.softmax(T.dot(fetre, (1.0 - self.args['dropout']) * fW) + fb)
-        #
-        # self.buildFunctions(p_y_given_x, p_y_given_x_dropout)
+    def get_cnn_rep(self):
+        rep_inter, dim_inter = non_consecutive_cnn(self)
+
+        if self.args['wed_window'] > 0:
+            rep_contexts, dim_contexts = trigger_contexts(self)
+            rep_inter = T.concatenate([rep_inter, rep_contexts], axis=1)
+            dim_inter += dim_contexts
+
+        rep_inter_dropout = dropout_from_layer(self.args['rng'], [rep_inter], self.args['dropout'])[0]
+
+        dim_hids = [dim_inter] + self.args['multilayer_nn']
+
+        rep_cnn, rep_cnn_dropout = multi_hidden_layers([rep_inter, rep_inter_dropout],
+                                                       dim_hids,
+                                                       self.container['params'],
+                                                       self.container['names'],
+                                                       'main_multi_nn')
+        dim_cnn = dim_hids[-1]
+
+        return rep_cnn, rep_cnn_dropout, dim_cnn
