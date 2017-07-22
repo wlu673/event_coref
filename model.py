@@ -97,7 +97,7 @@ def get_concatenation(embeddings, vars, features, transpose=False):
             if not transpose:
                 reps += [vars[fea]]
             else:
-                reps += [vars[fea].dimshuffle(1,0,2)]
+                reps += [vars[fea].dimshuffle(1, 0, 2)]
 
     if len(reps) == 1:
         X = reps[0]
@@ -383,12 +383,14 @@ class BaseModel(object):
 class MainModel(BaseModel):
     def __init__(self, args):
         BaseModel.__init__(self, args)
-        rep_cnn, rep_cnn_dropout, dim_cnn = self.get_cnn_rep()
+        rep_cnn, dim_cnn = self.get_cnn_rep()
+        local_score = self.get_local_score(rep_cnn, dim_cnn)
 
-        X = rep_cnn
+        X = local_score
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['anchor_position']]
-        self.F = theano.function(inputs=inputs, outputs=X, on_unused_input='warn')
+        inputs += [self.container['prev_inst']]
+        self.F = theano.function(inputs=inputs, outputs=X, on_unused_input='ignore')
 
     def get_cnn_rep(self):
         rep_inter, dim_inter = non_consecutive_cnn(self)
@@ -398,15 +400,25 @@ class MainModel(BaseModel):
             rep_inter = T.concatenate([rep_inter, rep_contexts], axis=1)
             dim_inter += dim_contexts
 
-        rep_inter_dropout = dropout_from_layer(self.args['rng'], [rep_inter], self.args['dropout'])[0]
+        if self.args['dropout'] > 0:
+            rep_inter = dropout_from_layer(self.args['rng'], [rep_inter], self.args['dropout'])[0]
 
         dim_hids = [dim_inter] + self.args['multilayer_nn']
 
-        rep_cnn, rep_cnn_dropout = multi_hidden_layers([rep_inter, rep_inter_dropout],
-                                                       dim_hids,
-                                                       self.container['params'],
-                                                       self.container['names'],
-                                                       'main_multi_nn')
+        rep_cnn = multi_hidden_layers([rep_inter],
+                                      dim_hids,
+                                      self.container['params'],
+                                      self.container['names'],
+                                      'main_multi_nn')[0]
         dim_cnn = dim_hids[-1]
 
-        return rep_cnn, rep_cnn_dropout, dim_cnn
+        return rep_cnn, dim_cnn
+
+    def get_local_score(self, rep_cnn, dim_cnn):
+        v = theano.shared(np.zeros([1, dim_cnn]).astype(theano.config.floatX))
+        self.container['params'] += [v]
+        self.container['names'] += ['v']
+        rep_padding = T.concatenate([v, rep_cnn, T.alloc(0., 1, dim_cnn)])
+        prev_inst = rep_padding[self.container['prev_inst']]
+        local_score = T.batched_dot(rep_cnn[:, None, :], prev_inst.dimshuffle(0, 2, 1))
+        return local_score
