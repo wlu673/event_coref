@@ -54,6 +54,9 @@ def prepare_data(max_lengths, corpora, map_fea_to_index, features, map_binary_di
     for corpus in corpora:
         data_sets[corpus] = []
         for doc in corpora[corpus]:
+            if len(corpora[corpus][doc]['instances']) == 0:
+                pass
+
             data_doc = defaultdict(list)
             inst_in_doc = corpora[corpus][doc]['instances']
             for inst in inst_in_doc:
@@ -198,7 +201,8 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
         prev_inst_cluster[i - 1] = map_inst_to_cluster[i - 1] + 1
     data_doc['prev_inst_cluster'] += [prev_inst_cluster[:]]
 
-    data_doc['prev_inst_cluster_gold'] = np.array([[-1] * max_lengths['instance']] * max_lengths['instance'], dtype='int32')
+    data_doc['prev_inst_cluster_gold'] = np.array([[-1] * max_lengths['instance']] * max_lengths['instance'],
+                                                  dtype='int32')
     for inst_curr in range(num_inst):
         chain = coref[map_inst_to_cluster[inst_curr]]
         for inst_prev in chain:

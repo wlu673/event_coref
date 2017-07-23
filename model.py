@@ -360,10 +360,10 @@ class BaseModel(object):
         self.container['mask_rnn'] = T.vector('mask_rnn')
         self.container['current_hv'] = T.imatrix('current_hv')
         self.container['prev_inst'] = T.imatrix('prev_inst')
-        self.container['row_indices'] = T.imatrix('row_indices')
         self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
         self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
-        self.container['alphas'] = T.matrix('alphas')
+        self.container['alpha'] = T.matrix('alpha')
+        self.container['mask_cluster'] = T.vector('mask_cluster')
         
         self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['lr'] = T.scalar('lr')
@@ -435,14 +435,18 @@ class MainModel(BaseModel):
     def __init__(self, args):
         BaseModel.__init__(self, args)
         rep_cnn, dim_cnn = self.get_cnn_rep()
-        # local_score = self.get_local_score(rep_cnn, dim_cnn)
-        rnn_rep = self.get_global_score(rep_cnn, dim_cnn)
+        total_score = self.get_local_score(rep_cnn, dim_cnn) + self.get_global_score(rep_cnn, dim_cnn)
+        latent_score, alpha = self.get_latent(total_score)
+        score = T.max(alpha * (1 + total_score - latent_score), axis=1)
+        cost = T.sum(T.set_subtensor(score[T.nonzero(T.eq(score, -np.inf))], 0.))
 
-        X = rnn_rep
+        X = cost
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['anchor_position']]
         inputs += [self.container['prev_inst']]
-        inputs += [self.container['cluster'], self.container['mask_rnn']]
+        inputs += [self.container['cluster'], self.container['mask_rnn'], self.container['current_hv']]
+        inputs += [self.container['prev_inst_cluster'], self.container['prev_inst_cluster_gold']]
+        inputs += [self.container['alpha'], self.container['mask_cluster']]
         self.F = theano.function(inputs=inputs, outputs=X, on_unused_input='ignore')
 
     def get_cnn_rep(self):
@@ -473,7 +477,7 @@ class MainModel(BaseModel):
         self.container['names'] += ['v']
         padded = T.concatenate([v, rep_cnn, T.alloc(0., 1, dim_cnn)])
         prev_inst = padded[self.container['prev_inst']]
-        local_score = T.batched_dot(rep_cnn[:, None, :], prev_inst.dimshuffle(0, 2, 1))
+        local_score = T.batched_dot(rep_cnn, prev_inst.dimshuffle(0, 2, 1))
         return local_score
 
     def get_global_score(self, rep_cnn, dim_cnn):
@@ -487,5 +491,30 @@ class MainModel(BaseModel):
                           self.container['params'],
                           self.container['names'])
 
-        return rep_rnn
+        rep_rnn = T.concatenate([rep_rnn, T.alloc(0., 1, dim_cnn)])
+        current_hv = rep_rnn[self.container['current_hv']]
 
+        score_by_cluster = T.batched_dot(rep_cnn, current_hv.dimshuffle(0, 2, 1))
+        score_nonana = T.batched_dot(rep_cnn, T.sum(current_hv, axis=1))
+        score_by_cluster = T.concatenate([T.reshape(score_nonana, [self.args['batch'], 1]),
+                                          score_by_cluster,
+                                          T.alloc(0., self.args['batch'], 1)], axis=1)
+
+        row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
+                               dtype='int32')
+        global_score = score_by_cluster[row_indices, self.container['prev_inst_cluster']]
+        return global_score
+
+    def get_latent(self, score):
+        padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'], 1)], axis=1)
+        row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
+                               dtype='int32')
+        ante_score = padded[row_indices, self.container['prev_inst_cluster_gold']]
+        latent_score = T.max(ante_score, axis=1)
+        latent_score = T.set_subtensor(latent_score[T.nonzero(T.eq(latent_score, -np.inf))], 0.)
+
+        latent_inst = T.argmax(ante_score, axis=1)
+        row_indices = np.array([i for i in np.arange(self.args['batch'])], dtype='int32')
+        alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], self.container['mask_cluster'])
+
+        return T.reshape(latent_score, [self.args['batch'], 1]), alpha
