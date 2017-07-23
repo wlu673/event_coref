@@ -163,7 +163,7 @@ def add_instance_placeholder(data_doc, features, map_fea_to_index, map_binary_di
 def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alphas):
     map_inst_to_cluster = {}
     cluster_offset = 0
-    current_hv = [0] * len(coref) + [-1] * (max_lengths['cluster'] - len(coref))
+    starting_hv = [0] * len(coref) + [-1] * (max_lengths['cluster'] - len(coref))
     inst_init = [0] * num_inst
     index = 0
     for chain in coref:
@@ -175,14 +175,21 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
         mask = [0] + [1] * (len(chain) - 1)
         data_doc['mask_rnn'] += mask
 
-        current_hv[index] = cluster_offset
+        starting_hv[index] = cluster_offset
         cluster_offset += len(chain)
         index += 1
 
+    current_hv = [-1] * max_lengths['cluster']
+    mask_current_hv = [0] * max_lengths['cluster']
     for i in range(num_inst):
         data_doc['current_hv'] += [current_hv[:]]
-        current_hv[map_inst_to_cluster[i]] += 1
-    mask_current_hv = [[1] * len(coref) + [0] * (max_lengths['cluster'] - len(coref))] * num_inst
+        data_doc['mask_current_hv'] += [mask_current_hv[:]]
+        cluster_index = map_inst_to_cluster[i]
+        mask_current_hv[cluster_index] = 1
+        if current_hv[cluster_index] == -1:
+            current_hv[cluster_index] = starting_hv[cluster_index]
+        else:
+            current_hv[cluster_index] += 1
 
     prev_inst_cluster = [0] + [-1] * (max_lengths['instance'] - 1)
     for i in range(1, num_inst):
@@ -203,7 +210,7 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
     data_doc['mask_rnn'] += [0] * num_placeholder
     data_doc['mask_cluster'] = [1] * num_inst + [0] * num_placeholder
     data_doc['current_hv'] += [[-1] * max_lengths['cluster']] * num_placeholder
-    data_doc['mask_current_hv'] = mask_current_hv + [[0] * max_lengths['cluster']] * num_placeholder
+    data_doc['mask_current_hv'] += [[0] * max_lengths['cluster']] * num_placeholder
     data_doc['prev_inst_cluster'] += [[0] * max_lengths['instance']] * (max_lengths['instance'] - num_inst)
 
     data_doc['alpha'] = get_penalty_rates(inst_init, max_lengths, alphas)
@@ -248,9 +255,10 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     features = prepare_features(expected_features)
     map_binary_dim = get_dim_mapping(embeddings, map_fea_to_index, features)
     data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, map_binary_dim, alphas)
-    ap = data_sets['train'][0]['anchor_position']
-    print ap
-    print len(ap)
+
+    print corpora['train'][data_sets['train'][0]['doc_id']]['coreference'], '\n\n'
+    print data_sets['train'][0]['cluster'], '\n\n'
+    print data_sets['train'][0]['current_hv'], '\n\n'
     print max_lengths['instance']
 
 

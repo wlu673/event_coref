@@ -251,6 +251,57 @@ def hidden_layer(inputs, dim_in, dim_out, params, names, prefix):
 
 
 ###########################################################################
+# RNN
+
+def rnn_gru(inputs, dim_in, dim_hidden, mask, prefix, params, names):
+    Uc = theano.shared(np.concatenate([ortho_weight(dim_hidden), ortho_weight(dim_hidden)], axis=1))
+    Wc = theano.shared(np.concatenate([random_matrix(dim_in, dim_hidden), random_matrix(dim_in, dim_hidden)], axis=1))
+    bc = theano.shared(np.zeros(2 * dim_hidden, dtype=theano.config.floatX))
+
+    Ux = theano.shared(ortho_weight(dim_hidden))
+    Wx = theano.shared(random_matrix(dim_in, dim_hidden))
+    bx = theano.shared(np.zeros(dim_hidden, dtype=theano.config.floatX))
+
+    params += [Wc, bc, Uc, Wx, Ux, bx]
+    names += [prefix + '_Wc', prefix + '_bc', prefix + '_Uc', prefix + '_Wx', prefix + '_Ux', prefix + '_bx']
+
+    def recurrence(x_t, m, h_tm1):
+        h_tm1 = m * h_tm1
+        preact = T.nnet.sigmoid(T.dot(h_tm1, Uc) + T.dot(x_t, Wc) + bc)
+
+        r_t = _slice(preact, 0, dim_hidden)
+        u_t = _slice(preact, 1, dim_hidden)
+
+        h_t = T.tanh(T.dot(h_tm1, Ux) * r_t + T.dot(x_t, Wx) + bx)
+        h_t = u_t * h_tm1 + (1. - u_t) * h_t
+
+        return h_t
+
+    h, _ = theano.scan(fn=recurrence,
+                       sequences=[inputs, mask],
+                       outputs_info=T.alloc(0., dim_hidden),
+                       n_steps=inputs.shape[0])
+
+    return h
+
+
+def random_matrix(row, column, scale=0.2):
+    # bound = np.sqrt(6. / (row + column))
+    bound = 1.
+    return scale * np.random.uniform(low=-bound, high=bound, size=(row, column)).astype(theano.config.floatX)
+
+
+def ortho_weight(dim):
+    W = np.random.randn(dim, dim)
+    u, s, v = np.linalg.svd(W)
+    return u.astype(theano.config.floatX)
+
+
+def _slice(_x, n, dim):
+    return _x[n*dim:(n+1)*dim]
+
+
+###########################################################################
 # Model Utilities
 
 def trigger_contexts(model):
@@ -306,7 +357,7 @@ class BaseModel(object):
         self.prepare_features()
 
         self.container['cluster'] = T.ivector('cluster')
-        self.container['mask_rnn'] = T.ivector('mask_rnn')
+        self.container['mask_rnn'] = T.vector('mask_rnn')
         self.container['current_hv'] = T.imatrix('current_hv')
         self.container['prev_inst'] = T.imatrix('prev_inst')
         self.container['row_indices'] = T.imatrix('row_indices')
@@ -384,12 +435,14 @@ class MainModel(BaseModel):
     def __init__(self, args):
         BaseModel.__init__(self, args)
         rep_cnn, dim_cnn = self.get_cnn_rep()
-        local_score = self.get_local_score(rep_cnn, dim_cnn)
+        # local_score = self.get_local_score(rep_cnn, dim_cnn)
+        rnn_rep = self.get_global_score(rep_cnn, dim_cnn)
 
-        X = local_score
+        X = rnn_rep
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['anchor_position']]
         inputs += [self.container['prev_inst']]
+        inputs += [self.container['cluster'], self.container['mask_rnn']]
         self.F = theano.function(inputs=inputs, outputs=X, on_unused_input='ignore')
 
     def get_cnn_rep(self):
@@ -418,7 +471,21 @@ class MainModel(BaseModel):
         v = theano.shared(np.zeros([1, dim_cnn]).astype(theano.config.floatX))
         self.container['params'] += [v]
         self.container['names'] += ['v']
-        rep_padding = T.concatenate([v, rep_cnn, T.alloc(0., 1, dim_cnn)])
-        prev_inst = rep_padding[self.container['prev_inst']]
+        padded = T.concatenate([v, rep_cnn, T.alloc(0., 1, dim_cnn)])
+        prev_inst = padded[self.container['prev_inst']]
         local_score = T.batched_dot(rep_cnn[:, None, :], prev_inst.dimshuffle(0, 2, 1))
         return local_score
+
+    def get_global_score(self, rep_cnn, dim_cnn):
+        padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
+        X = padded[self.container['cluster']]
+        rep_rnn = rnn_gru(X,
+                          dim_cnn,
+                          dim_cnn,
+                          self.container['mask_rnn'],
+                          'main_rnn',
+                          self.container['params'],
+                          self.container['names'])
+
+        return rep_rnn
+
