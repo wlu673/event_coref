@@ -26,9 +26,9 @@ def adadelta(inputs, cost, names, parameters, gradients, lr, norm_lim, rho=0.95,
     if norm_lim > 0:
         param_up = clip_gradient(param_up, norm_lim, names)
 
-    f_param_update = theano.function([lr], [], updates=ru2up + param_up, on_unused_input='ignore')
+    f_update_param = theano.function([lr], [], updates=ru2up + param_up, on_unused_input='ignore')
 
-    return f_grad_shared, f_param_update
+    return f_grad_shared, f_update_param
 
 
 def sgd(ips, cost, names, parameters, gradients, lr, norm_lim):
@@ -74,7 +74,7 @@ def non_consecutive_cnn(model):
     rep_cnn = non_consecutive_cnn_driver(X,
                                          model.args['cnn_filter_num'],
                                          model.args['cnn_filter_wins'],
-                                         model.args['batch'],
+                                         model.args['batch'] * model.args['max_inst_in_doc'],
                                          model.args['window'],
                                          model.container['fea_dim'],
                                          'non_consecutive_cnn',
@@ -340,37 +340,36 @@ def dropout_from_layer(rng, layers, p):
 ###########################################################################
 
 
-
-class BaseModel(object):
+class MainModel(object):
     def __init__(self, args):
-        self.container = {}
-        self.header_width = 60
-
         self.args = args
         self.args['rng'] = np.random.RandomState(3435)
         self.args['dropout'] = args['dropout'] if args['dropout'] > 0. else 0.
 
+        self.container = {}
+        self.prepare_features()
+        self.define_vars()
+
+        rep_cnn, dim_cnn = self.get_cnn_rep()
+        local_score = self.get_local_score(rep_cnn, dim_cnn)
+
+        self.f_grad_shared, self.f_update_param = self.build_train(rep_cnn, dim_cnn, local_score)
+        self.container['set_zero'] = OrderedDict()
+        self.container['zero_vecs'] = OrderedDict()
+        for ed in self.container['embeddings']:
+            self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
+            self.container['set_zero'][ed] = \
+                theano.function([self.container['zero_vector']],
+                                updates=[(self.container['embeddings'][ed],
+                                          T.set_subtensor(self.container['embeddings'][ed][0, :],
+                                                          self.container['zero_vector']))])
+
+    def prepare_features(self, header_width = 60):
+        self.container['fea_dim'] = 0
         self.container['params'], self.container['names'] = [], []
         self.container['embeddings'], self.container['vars'] = OrderedDict(), OrderedDict()
-        self.container['fea_dim'] = 0
 
-        self.prepare_features()
-
-        self.container['cluster'] = T.ivector('cluster')
-        self.container['mask_rnn'] = T.vector('mask_rnn')
-        self.container['current_hv'] = T.imatrix('current_hv')
-        self.container['prev_inst'] = T.imatrix('prev_inst')
-        self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
-        self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
-        self.container['alpha'] = T.matrix('alpha')
-        self.container['mask_cluster'] = T.vector('mask_cluster')
-        
-        self.container['anchor_position'] = T.ivector('anchor_position')
-        self.container['lr'] = T.scalar('lr')
-        self.container['zero_vector'] = T.vector('zero_vector')
-
-    def prepare_features(self):
-        print 'Features'.center(self.header_width, '-')
+        print 'Features'.center(header_width, '-')
         print 'Will update embeddings' if self.args['update_embs'] else 'Will not update embeddings'
         for fea in self.args['features']:
             if self.args['features'][fea] == 0:
@@ -387,67 +386,20 @@ class BaseModel(object):
                 print 'Using feature \'%s\' with dimension %d' % (fea, dim_added)
 
         print 'Total feature dimension:', self.container['fea_dim']
-        print '-' * self.header_width
+        print '-' * header_width
 
-    def build_functions(self, score, score_dropout, pred_ante):
-
-        cost = T.sum(score) if self.args['dropout'] == 0. else T.sum(score_dropout)
-
-        # if self.args['regularizer'] > 0.:
-        #     for p, n in zip(self.container['params'], self.container['names']):
-        #         if 'multi' in n:
-        #             cost += self.args['regularizer'] * (p ** 2).sum()
-
-        gradients = T.grad(cost, self.container['params'])
-
-        classify_inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        classify_inputs += [self.container['prev_inst']]
-        self.classify = theano.function(inputs=classify_inputs, outputs=pred_ante, on_unused_input='ignore')
-
-        train_inputs = classify_inputs + [self.container[item] for item in ['cluster',
-                                                                            'mask_rnn',
-                                                                            'current_hv',
-                                                                            'row_indices',
-                                                                            'prev_inst_cluster',
-                                                                            'prev_inst_cluster_gold',
-                                                                            'alphas']]
-
-        self.f_grad_shared, self.f_update_param = eval(self.args['optimizer'])(train_inputs,
-                                                                               cost,
-                                                                               self.container['names'],
-                                                                               self.container['params'],
-                                                                               gradients,
-                                                                               self.container['lr'],
-                                                                               self.args['norm_lim'])
-
-        # Set the embedding vectors for placeholders to zero
-        self.container['set_zero'] = OrderedDict()
-        self.container['zero_vecs'] = OrderedDict()
-        for ed in self.container['embeddings']:
-            self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
-            self.container['set_zero'][ed] = theano.function([self.container['zero_vector']],
-                                                             updates=[(self.container['embeddings'][ed],
-                                                                       T.set_subtensor(self.container['embeddings'][ed][0, :],
-                                                                                       self.container['zero_vector']))])
-
-
-class MainModel(BaseModel):
-    def __init__(self, args):
-        BaseModel.__init__(self, args)
-        rep_cnn, dim_cnn = self.get_cnn_rep()
-        total_score = self.get_local_score(rep_cnn, dim_cnn) + self.get_global_score(rep_cnn, dim_cnn)
-        latent_score, alpha = self.get_latent(total_score)
-        score = T.max(alpha * (1 + total_score - latent_score), axis=1)
-        cost = T.sum(T.set_subtensor(score[T.nonzero(T.eq(score, -np.inf))], 0.))
-
-        X = cost
-        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['anchor_position']]
-        inputs += [self.container['prev_inst']]
-        inputs += [self.container['cluster'], self.container['mask_rnn'], self.container['current_hv']]
-        inputs += [self.container['prev_inst_cluster'], self.container['prev_inst_cluster_gold']]
-        inputs += [self.container['alpha'], self.container['mask_cluster']]
-        self.F = theano.function(inputs=inputs, outputs=X, on_unused_input='ignore')
+    def define_vars(self):
+        self.container['cluster'] = T.ivector('cluster')
+        self.container['mask_rnn'] = T.vector('mask_rnn')
+        self.container['current_hv'] = T.imatrix('current_hv')
+        self.container['prev_inst'] = T.imatrix('prev_inst')
+        self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
+        self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
+        self.container['alpha'] = T.matrix('alpha')
+        self.container['mask_cluster'] = T.vector('mask_cluster')
+        self.container['anchor_position'] = T.ivector('anchor_position')
+        self.container['lr'] = T.scalar('lr')
+        self.container['zero_vector'] = T.vector('zero_vector')
 
     def get_cnn_rep(self):
         rep_inter, dim_inter = non_consecutive_cnn(self)
@@ -480,6 +432,34 @@ class MainModel(BaseModel):
         local_score = T.batched_dot(rep_cnn, prev_inst.dimshuffle(0, 2, 1))
         return local_score
 
+    def build_train(self, rep_cnn, dim_cnn, local_score):
+        total_score = local_score + self.get_global_score(rep_cnn, dim_cnn)
+        latent_score, alpha = self.get_latent(total_score)
+        score = T.max(alpha * (1 + total_score - latent_score), axis=1)
+        cost = T.sum(T.set_subtensor(score[T.nonzero(T.eq(score, -np.inf))], 0.))
+        gradients = T.grad(cost, self.container['params'])
+
+        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['anchor_position'],
+                   self.container['prev_inst'],
+                   self.container['cluster'],
+                   self.container['mask_rnn'],
+                   self.container['current_hv'],
+                   self.container['prev_inst_cluster'],
+                   self.container['prev_inst_cluster_gold'],
+                   self.container['alpha'],
+                   self.container['mask_cluster']]
+
+        f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
+                                                                     cost,
+                                                                     self.container['names'],
+                                                                     self.container['params'],
+                                                                     gradients,
+                                                                     self.container['lr'],
+                                                                     self.args['norm_lim'])
+
+        return f_grad_shared, f_update_param
+
     def get_global_score(self, rep_cnn, dim_cnn):
         padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
         X = padded[self.container['cluster']]
@@ -496,25 +476,25 @@ class MainModel(BaseModel):
 
         score_by_cluster = T.batched_dot(rep_cnn, current_hv.dimshuffle(0, 2, 1))
         score_nonana = T.batched_dot(rep_cnn, T.sum(current_hv, axis=1))
-        score_by_cluster = T.concatenate([T.reshape(score_nonana, [self.args['batch'], 1]),
+        score_by_cluster = T.concatenate([T.reshape(score_nonana, [self.args['batch'] * self.args['max_inst_in_doc'], 1]),
                                           score_by_cluster,
-                                          T.alloc(0., self.args['batch'], 1)], axis=1)
+                                          T.alloc(0., self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
 
-        row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
-                               dtype='int32')
+        row_indices = np.array([[i] * self.args['max_inst_in_doc']
+                                for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
         global_score = score_by_cluster[row_indices, self.container['prev_inst_cluster']]
         return global_score
 
     def get_latent(self, score):
-        padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'], 1)], axis=1)
-        row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
-                               dtype='int32')
+        padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
+        row_indices = np.array([[i] * self.args['max_inst_in_doc']
+                                for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
         ante_score = padded[row_indices, self.container['prev_inst_cluster_gold']]
         latent_score = T.max(ante_score, axis=1)
         latent_score = T.set_subtensor(latent_score[T.nonzero(T.eq(latent_score, -np.inf))], 0.)
 
         latent_inst = T.argmax(ante_score, axis=1)
-        row_indices = np.array([i for i in np.arange(self.args['batch'])], dtype='int32')
+        row_indices = np.array([i for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
         alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], self.container['mask_cluster'])
 
-        return T.reshape(latent_score, [self.args['batch'], 1]), alpha
+        return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha
