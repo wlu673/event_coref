@@ -262,15 +262,19 @@ def rnn_gru(inputs, dim_in, dim_hidden, mask, prefix, params, names):
     Wx = theano.shared(random_matrix(dim_in, dim_hidden))
     bx = theano.shared(np.zeros(dim_hidden, dtype=theano.config.floatX))
 
-    params += [Wc, bc, Uc, Wx, Ux, bx]
+    gru_params = [Wc, bc, Uc, Wx, Ux, bx]
+    params += gru_params
     names += [prefix + '_Wc', prefix + '_bc', prefix + '_Uc', prefix + '_Wx', prefix + '_Ux', prefix + '_bx']
+
+    def _slice(_x, n):
+        return _x[n * dim_hidden:(n + 1) * dim_hidden]
 
     def recurrence(x_t, m, h_tm1):
         h_tm1 = m * h_tm1
         preact = T.nnet.sigmoid(T.dot(h_tm1, Uc) + T.dot(x_t, Wc) + bc)
 
-        r_t = _slice(preact, 0, dim_hidden)
-        u_t = _slice(preact, 1, dim_hidden)
+        r_t = _slice(preact, 0)
+        u_t = _slice(preact, 1)
 
         h_t = T.tanh(T.dot(h_tm1, Ux) * r_t + T.dot(x_t, Wx) + bx)
         h_t = u_t * h_tm1 + (1. - u_t) * h_t
@@ -282,7 +286,7 @@ def rnn_gru(inputs, dim_in, dim_hidden, mask, prefix, params, names):
                        outputs_info=T.alloc(0., dim_hidden),
                        n_steps=inputs.shape[0])
 
-    return h
+    return h, gru_params
 
 
 def random_matrix(row, column, scale=0.2):
@@ -295,10 +299,6 @@ def ortho_weight(dim):
     W = np.random.randn(dim, dim)
     u, s, v = np.linalg.svd(W)
     return u.astype(theano.config.floatX)
-
-
-def _slice(_x, n, dim):
-    return _x[n*dim:(n+1)*dim]
 
 
 ###########################################################################
@@ -352,8 +352,10 @@ class MainModel(object):
 
         rep_cnn, dim_cnn = self.get_cnn_rep()
         local_score = self.get_local_score(rep_cnn, dim_cnn)
+        global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
 
-        # self.f_grad_shared, self.f_update_param = self.build_train(rep_cnn, dim_cnn, local_score)
+        self.get_grad = self.build_train(local_score, global_score)
+        # self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
         # self.container['set_zero'] = OrderedDict()
         # self.container['zero_vecs'] = OrderedDict()
         # for ed in self.container['embeddings']:
@@ -364,16 +366,9 @@ class MainModel(object):
         #                                   T.set_subtensor(self.container['embeddings'][ed][0, :],
         #                                                   self.container['zero_vector']))])
 
-        X = self.build_test(rep_cnn, local_score)
+        # self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
 
-        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['anchor_position'],
-                   self.container['prev_inst'],
-                   self.container['test_current_hv'],
-                   self.container['test_prev_inst_cluster'],
-                   self.container['test_current_cluster']]
-
-        self.F = theano.function(inputs, X, on_unused_input='warn')
+        # self.get_params = theano.function([], self.container['params'])
 
     def prepare_features(self, header_width = 60):
         self.container['fea_dim'] = 0
@@ -412,10 +407,6 @@ class MainModel(object):
         self.container['lr'] = T.scalar('lr')
         self.container['zero_vector'] = T.vector('zero_vector')
 
-        self.container['test_current_hv'] = T.tensor3('test_current_hv')
-        self.container['test_prev_inst_cluster'] = T.imatrix('test_prev_inst_cluster')
-        self.container['test_current_cluster'] = T.ivector('test_current_vector')
-
     def get_cnn_rep(self):
         rep_inter, dim_inter = non_consecutive_cnn(self)
 
@@ -447,8 +438,8 @@ class MainModel(object):
         local_score = T.batched_dot(rep_cnn, prev_inst.dimshuffle(0, 2, 1))
         return local_score
 
-    def build_train(self, rep_cnn, dim_cnn, local_score):
-        total_score = local_score + self.get_global_score(rep_cnn, dim_cnn)
+    def build_train(self, local_score, global_score):
+        total_score = local_score + global_score
         latent_score, alpha = self.get_latent(total_score)
         score = T.max(alpha * (1 + total_score - latent_score), axis=1)
         cost = T.sum(T.set_subtensor(score[T.nonzero(T.eq(score, -np.inf))], 0.))
@@ -465,26 +456,28 @@ class MainModel(object):
                    self.container['alpha'],
                    self.container['mask_cluster']]
 
-        f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
-                                                                     cost,
-                                                                     self.container['names'],
-                                                                     self.container['params'],
-                                                                     gradients,
-                                                                     self.container['lr'],
-                                                                     self.args['norm_lim'])
+        return theano.function(inputs, gradients, on_unused_input='warn')
 
-        return f_grad_shared, f_update_param
+        # f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
+        #                                                              cost,
+        #                                                              self.container['names'],
+        #                                                              self.container['params'],
+        #                                                              gradients,
+        #                                                              self.container['lr'],
+        #                                                              self.args['norm_lim'])
+        #
+        # return f_grad_shared, f_update_param
 
     def get_global_score(self, rep_cnn, dim_cnn):
         padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
         X = padded[self.container['cluster']]
-        rep_rnn = rnn_gru(X,
-                          dim_cnn,
-                          dim_cnn,
-                          self.container['mask_rnn'],
-                          'main_rnn',
-                          self.container['params'],
-                          self.container['names'])
+        rep_rnn, gru_params = rnn_gru(X,
+                                      dim_cnn,
+                                      dim_cnn,
+                                      self.container['mask_rnn'],
+                                      'main_rnn',
+                                      self.container['params'],
+                                      self.container['names'])
 
         rep_rnn = T.concatenate([rep_rnn, T.alloc(0., 1, dim_cnn)])
         current_hv = rep_rnn[self.container['current_hv']]
@@ -498,7 +491,7 @@ class MainModel(object):
         row_indices = np.array([[i] * self.args['max_inst_in_doc']
                                 for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
         global_score = score_by_cluster[row_indices, self.container['prev_inst_cluster']]
-        return global_score
+        return global_score, gru_params
 
     def get_latent(self, score):
         padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
@@ -514,11 +507,28 @@ class MainModel(object):
 
         return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha
 
-    def build_test(self, rep_cnn, local_score):
+    def build_test(self, rep_cnn, dim_cnn, local_score, gru_params):
+        Wc, bc, Uc, Wx, Ux, bx = gru_params
+
+        def _slice(_x, n):
+            return _x[:, n * dim_cnn:(n + 1) * dim_cnn]
+
+        def gru_step(x_t, h_tm1):
+            preact = T.nnet.sigmoid(T.dot(h_tm1, Uc) + T.dot(x_t, Wc) + bc)
+
+            r_t = _slice(preact, 0)
+            u_t = _slice(preact, 1)
+
+            h_t = T.tanh(T.dot(h_tm1, Ux) * r_t + T.dot(x_t, Wx) + bx)
+            h_t = u_t * h_tm1 + (1. - u_t) * h_t
+
+            return h_t
+
+        offsets = np.array([i * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])], dtype='int32')
+
         def recurrence(curr_inst, current_hv, prev_inst_cluster, current_cluster):
-            curr_indices = np.array([curr_inst + i * self.args['max_inst_in_doc']
-                                     for i in np.arange(self.args['batch'])], dtype='int32')
-            pic1 = T.set_subtensor(prev_inst_cluster[:, curr_inst], np.array([0] * self.args['batch'], dtype='int32'))
+            curr_indices = offsets + curr_inst
+            prev_inst_cluster = T.set_subtensor(prev_inst_cluster[:, curr_inst], 0)
 
             curr_rep_cnn = rep_cnn[curr_indices]
             score_by_cluster = T.batched_dot(curr_rep_cnn, current_hv.transpose((0, 2, 1)))
@@ -527,23 +537,34 @@ class MainModel(object):
                                               score_by_cluster,
                                               T.alloc(-np.inf, self.args['batch'], 1)], axis=1)
 
-            indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
-                               dtype='int32')
-            global_score = score_by_cluster[indices, pic1]
+            row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
+                                   dtype='int32')
+            global_score = score_by_cluster[row_indices, prev_inst_cluster]
             score = local_score[curr_indices] + global_score
 
-            indices_single = np.array([i for i in np.arange(self.args['batch'])], dtype='int32')
-            ante_cluster_raw = pic1[indices_single, T.argmax(score, axis=1)]
+            indices_single = T.arange(self.args['batch'], dtype='int32')
+            ante_cluster_raw = prev_inst_cluster[indices_single, T.argmax(score, axis=1)]
             indices_new_cluster = T.nonzero(T.eq(ante_cluster_raw, 0))
             ante_cluster = T.set_subtensor(ante_cluster_raw[indices_new_cluster], current_cluster[indices_new_cluster])
-            cc1 = T.set_subtensor(current_cluster[indices_new_cluster], current_cluster[indices_new_cluster] + 1)
-            pic2 = T.set_subtensor(prev_inst_cluster[:, curr_inst], ante_cluster)
 
-            ante_hv = current_hv[indices_single, ante_cluster]
+            current_cluster = T.set_subtensor(current_cluster[indices_new_cluster], current_cluster[indices_new_cluster] + 1)
+            prev_inst_cluster = T.set_subtensor(prev_inst_cluster[:, curr_inst], ante_cluster)
 
-            return pic2
+            ante_hv = current_hv[indices_single, ante_cluster-1]
+            current_hv = T.set_subtensor(current_hv[indices_single, ante_cluster-1], gru_step(curr_rep_cnn, ante_hv))
 
-        return recurrence(0,
-                          self.container['test_current_hv'],
-                          self.container['test_prev_inst_cluster'],
-                          self.container['test_current_cluster'])
+            return current_hv, prev_inst_cluster, current_cluster
+
+        ini_current_hv = np.array([[[0.] * dim_cnn] * self.args['max_cluster_in_doc']]
+                                  * self.args['batch']).astype(theano.config.floatX)
+        ini_prev_inst_cluster = np.array([[-1] * self.args['max_inst_in_doc']] * self.args['batch'], dtype='int32')
+        ini_current_cluster = np.array([1] * self.args['batch'], dtype='int32')
+
+        ret, _ = theano.scan(fn=recurrence,
+                             sequences=T.arange(self.args['max_inst_in_doc'], dtype='int32'),
+                             outputs_info=[ini_current_hv, ini_prev_inst_cluster, ini_current_cluster])
+
+        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['anchor_position'], self.container['prev_inst']]
+
+        return theano.function(inputs, ret[1][-1], on_unused_input='warn')
