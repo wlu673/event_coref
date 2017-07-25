@@ -353,16 +353,27 @@ class MainModel(object):
         rep_cnn, dim_cnn = self.get_cnn_rep()
         local_score = self.get_local_score(rep_cnn, dim_cnn)
 
-        self.f_grad_shared, self.f_update_param = self.build_train(rep_cnn, dim_cnn, local_score)
-        self.container['set_zero'] = OrderedDict()
-        self.container['zero_vecs'] = OrderedDict()
-        for ed in self.container['embeddings']:
-            self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
-            self.container['set_zero'][ed] = \
-                theano.function([self.container['zero_vector']],
-                                updates=[(self.container['embeddings'][ed],
-                                          T.set_subtensor(self.container['embeddings'][ed][0, :],
-                                                          self.container['zero_vector']))])
+        # self.f_grad_shared, self.f_update_param = self.build_train(rep_cnn, dim_cnn, local_score)
+        # self.container['set_zero'] = OrderedDict()
+        # self.container['zero_vecs'] = OrderedDict()
+        # for ed in self.container['embeddings']:
+        #     self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
+        #     self.container['set_zero'][ed] = \
+        #         theano.function([self.container['zero_vector']],
+        #                         updates=[(self.container['embeddings'][ed],
+        #                                   T.set_subtensor(self.container['embeddings'][ed][0, :],
+        #                                                   self.container['zero_vector']))])
+
+        X = self.build_test(rep_cnn, local_score)
+
+        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['anchor_position'],
+                   self.container['prev_inst'],
+                   self.container['test_current_hv'],
+                   self.container['test_prev_inst_cluster'],
+                   self.container['test_current_cluster']]
+
+        self.F = theano.function(inputs, X, on_unused_input='warn')
 
     def prepare_features(self, header_width = 60):
         self.container['fea_dim'] = 0
@@ -400,6 +411,10 @@ class MainModel(object):
         self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['lr'] = T.scalar('lr')
         self.container['zero_vector'] = T.vector('zero_vector')
+
+        self.container['test_current_hv'] = T.tensor3('test_current_hv')
+        self.container['test_prev_inst_cluster'] = T.imatrix('test_prev_inst_cluster')
+        self.container['test_current_cluster'] = T.ivector('test_current_vector')
 
     def get_cnn_rep(self):
         rep_inter, dim_inter = non_consecutive_cnn(self)
@@ -498,3 +513,37 @@ class MainModel(object):
         alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], self.container['mask_cluster'])
 
         return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha
+
+    def build_test(self, rep_cnn, local_score):
+        def recurrence(curr_inst, current_hv, prev_inst_cluster, current_cluster):
+            curr_indices = np.array([curr_inst + i * self.args['max_inst_in_doc']
+                                     for i in np.arange(self.args['batch'])], dtype='int32')
+            pic1 = T.set_subtensor(prev_inst_cluster[:, curr_inst], np.array([0] * self.args['batch'], dtype='int32'))
+
+            curr_rep_cnn = rep_cnn[curr_indices]
+            score_by_cluster = T.batched_dot(curr_rep_cnn, current_hv.transpose((0, 2, 1)))
+            score_nonana = T.batched_dot(curr_rep_cnn, T.sum(current_hv, axis=1))
+            score_by_cluster = T.concatenate([T.reshape(score_nonana, [self.args['batch'], 1]),
+                                              score_by_cluster,
+                                              T.alloc(-np.inf, self.args['batch'], 1)], axis=1)
+
+            indices = np.array([[i] * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])],
+                               dtype='int32')
+            global_score = score_by_cluster[indices, pic1]
+            score = local_score[curr_indices] + global_score
+
+            indices_single = np.array([i for i in np.arange(self.args['batch'])], dtype='int32')
+            ante_cluster_raw = pic1[indices_single, T.argmax(score, axis=1)]
+            indices_new_cluster = T.nonzero(T.eq(ante_cluster_raw, 0))
+            ante_cluster = T.set_subtensor(ante_cluster_raw[indices_new_cluster], current_cluster[indices_new_cluster])
+            cc1 = T.set_subtensor(current_cluster[indices_new_cluster], current_cluster[indices_new_cluster] + 1)
+            pic2 = T.set_subtensor(prev_inst_cluster[:, curr_inst], ante_cluster)
+
+            ante_hv = current_hv[indices_single, ante_cluster]
+
+            return pic2
+
+        return recurrence(0,
+                          self.container['test_current_hv'],
+                          self.container['test_prev_inst_cluster'],
+                          self.container['test_current_cluster'])
