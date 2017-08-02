@@ -353,22 +353,22 @@ class MainModel(object):
         rep_cnn, dim_cnn = self.get_cnn_rep()
         local_score = self.get_local_score(rep_cnn, dim_cnn)
         global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
+        self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
+        # self.train = self.build_train(local_score, global_score)
+        self.container['set_zero'] = OrderedDict()
+        self.container['zero_vecs'] = OrderedDict()
+        for ed in self.container['embeddings']:
+            self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
+            self.container['set_zero'][ed] = \
+                theano.function([self.container['zero_vector']],
+                                updates=[(self.container['embeddings'][ed],
+                                          T.set_subtensor(self.container['embeddings'][ed][0, :],
+                                                          self.container['zero_vector']))])
+
+        self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
 
         self.get_grad = self.build_train(local_score, global_score)
-        # self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
-        # self.container['set_zero'] = OrderedDict()
-        # self.container['zero_vecs'] = OrderedDict()
-        # for ed in self.container['embeddings']:
-        #     self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
-        #     self.container['set_zero'][ed] = \
-        #         theano.function([self.container['zero_vector']],
-        #                         updates=[(self.container['embeddings'][ed],
-        #                                   T.set_subtensor(self.container['embeddings'][ed][0, :],
-        #                                                   self.container['zero_vector']))])
-
-        # self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
-
-        # self.get_params = theano.function([], self.container['params'])
+        self.get_params = theano.function([], self.container['params'])
 
     def prepare_features(self, header_width = 60):
         self.container['fea_dim'] = 0
@@ -402,7 +402,6 @@ class MainModel(object):
         self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
         self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
         self.container['alpha'] = T.matrix('alpha')
-        self.container['mask_cluster'] = T.vector('mask_cluster')
         self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['lr'] = T.scalar('lr')
         self.container['zero_vector'] = T.vector('zero_vector')
@@ -441,9 +440,9 @@ class MainModel(object):
     def build_train(self, local_score, global_score):
         total_score = local_score + global_score
         latent_score, alpha = self.get_latent(total_score)
-        score = T.max(alpha * (1 + total_score - latent_score), axis=1)
-        cost = T.sum(T.set_subtensor(score[T.nonzero(T.eq(score, -np.inf))], 0.))
+        cost = T.sum(T.max(alpha * (1 + total_score - latent_score), axis=1))
         gradients = T.grad(cost, self.container['params'])
+        # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
 
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['anchor_position'],
@@ -453,20 +452,21 @@ class MainModel(object):
                    self.container['current_hv'],
                    self.container['prev_inst_cluster'],
                    self.container['prev_inst_cluster_gold'],
-                   self.container['alpha'],
-                   self.container['mask_cluster']]
+                   self.container['alpha']]
 
-        return theano.function(inputs, gradients, on_unused_input='warn')
+        # return theano.function(inputs, outputs=total_score, on_unused_input='warn')
+        # return theano.function(inputs, outputs=cost, updates=updates, on_unused_input='warn')
+        # return theano.function(inputs, gradients, on_unused_input='warn')
 
-        # f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
-        #                                                              cost,
-        #                                                              self.container['names'],
-        #                                                              self.container['params'],
-        #                                                              gradients,
-        #                                                              self.container['lr'],
-        #                                                              self.args['norm_lim'])
-        #
-        # return f_grad_shared, f_update_param
+        f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
+                                                                     cost,
+                                                                     self.container['names'],
+                                                                     self.container['params'],
+                                                                     gradients,
+                                                                     self.container['lr'],
+                                                                     self.args['norm_lim'])
+
+        return f_grad_shared, f_update_param
 
     def get_global_score(self, rep_cnn, dim_cnn):
         padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
@@ -495,6 +495,7 @@ class MainModel(object):
 
     def get_latent(self, score):
         padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
+        # padded = T.concatenate([score, T.alloc(0., self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
         row_indices = np.array([[i] * self.args['max_inst_in_doc']
                                 for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
         ante_score = padded[row_indices, self.container['prev_inst_cluster_gold']]
@@ -502,8 +503,8 @@ class MainModel(object):
         latent_score = T.set_subtensor(latent_score[T.nonzero(T.eq(latent_score, -np.inf))], 0.)
 
         latent_inst = T.argmax(ante_score, axis=1)
-        row_indices = np.array([i for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
-        alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], self.container['mask_cluster'])
+        row_indices = T.arange(self.args['batch'] * self.args['max_inst_in_doc'], dtype='int32')
+        alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], 0.)
 
         return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha
 
