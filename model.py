@@ -355,6 +355,7 @@ class MainModel(object):
         global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
         self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
         # self.train = self.build_train(local_score, global_score)
+
         self.container['set_zero'] = OrderedDict()
         self.container['zero_vecs'] = OrderedDict()
         for ed in self.container['embeddings']:
@@ -367,8 +368,7 @@ class MainModel(object):
 
         self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
 
-        self.get_grad = self.build_train(local_score, global_score)
-        self.get_params = theano.function([], self.container['params'])
+        # self.get_params = theano.function([], self.container['params'])
 
     def prepare_features(self, header_width = 60):
         self.container['fea_dim'] = 0
@@ -429,7 +429,7 @@ class MainModel(object):
         return rep_cnn, dim_cnn
 
     def get_local_score(self, rep_cnn, dim_cnn):
-        v = theano.shared(np.zeros([1, dim_cnn]).astype(theano.config.floatX))
+        v = theano.shared(np.random.uniform(low=-0.2, high=0.2, size=(1, dim_cnn)).astype(theano.config.floatX))
         self.container['params'] += [v]
         self.container['names'] += ['v']
         padded = T.concatenate([v, rep_cnn, T.alloc(0., 1, dim_cnn)])
@@ -439,8 +439,9 @@ class MainModel(object):
 
     def build_train(self, local_score, global_score):
         total_score = local_score + global_score
-        latent_score, alpha = self.get_latent(total_score)
+        latent_score, alpha, latent_inst = self.get_latent(total_score)
         cost = T.sum(T.max(alpha * (1 + total_score - latent_score), axis=1))
+        # cost = T.max(alpha * (1 + total_score - latent_score), axis=1)
         gradients = T.grad(cost, self.container['params'])
         # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
 
@@ -455,7 +456,7 @@ class MainModel(object):
                    self.container['alpha']]
 
         # return theano.function(inputs, outputs=total_score, on_unused_input='warn')
-        # return theano.function(inputs, outputs=cost, updates=updates, on_unused_input='warn')
+        # return theano.function(inputs, outputs=[latent_inst, alpha], on_unused_input='warn')
         # return theano.function(inputs, gradients, on_unused_input='warn')
 
         f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
@@ -506,7 +507,7 @@ class MainModel(object):
         row_indices = T.arange(self.args['batch'] * self.args['max_inst_in_doc'], dtype='int32')
         alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], 0.)
 
-        return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha
+        return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha, latent_inst
 
     def build_test(self, rep_cnn, dim_cnn, local_score, gru_params):
         Wc, bc, Uc, Wx, Ux, bx = gru_params
