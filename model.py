@@ -352,6 +352,7 @@ class MainModel(object):
 
         rep_cnn, dim_cnn = self.get_cnn_rep()
         local_score = self.get_local_score(rep_cnn, dim_cnn)
+
         global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
         self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
         # self.train = self.build_train(local_score, global_score)
@@ -359,7 +360,7 @@ class MainModel(object):
         self.container['set_zero'] = OrderedDict()
         self.container['zero_vecs'] = OrderedDict()
         for ed in self.container['embeddings']:
-            self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1], dtype='float32')
+            self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1]).astype(theano.config.floatX)
             self.container['set_zero'][ed] = \
                 theano.function([self.container['zero_vector']],
                                 updates=[(self.container['embeddings'][ed],
@@ -368,7 +369,7 @@ class MainModel(object):
 
         self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
 
-        # self.get_params = theano.function([], self.container['params'])
+        self.get_params = theano.function([], self.container['params'])
 
     def prepare_features(self, header_width = 60):
         self.container['fea_dim'] = 0
@@ -446,12 +447,12 @@ class MainModel(object):
         # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
 
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['anchor_position'],
-                   self.container['prev_inst'],
+        inputs += [self.container['prev_inst'],
                    self.container['cluster'],
-                   self.container['mask_rnn'],
                    self.container['current_hv'],
+                   self.container['mask_rnn'],
                    self.container['prev_inst_cluster'],
+                   self.container['anchor_position'],
                    self.container['prev_inst_cluster_gold'],
                    self.container['alpha']]
 
@@ -567,6 +568,6 @@ class MainModel(object):
                              outputs_info=[ini_current_hv, ini_prev_inst_cluster, ini_current_cluster])
 
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['anchor_position'], self.container['prev_inst']]
+        inputs += [self.container['prev_inst'], self.container['anchor_position']]
 
         return theano.function(inputs, ret[1][-1], on_unused_input='warn')

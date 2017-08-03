@@ -417,7 +417,7 @@ def main():
     print 'Dumping ...'
     cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index],
                  open(src_dir + '/' + 'nugget.pkl', 'wb'))
-    cPickle.dump([max_lengths, corpora], open(src_dir + '/' + 'corpora.pkl', 'wb'))
+    # cPickle.dump([max_lengths, corpora], open(src_dir + '/' + 'corpora.pkl', 'wb'))
     print 'Dataset created!'
 
 
