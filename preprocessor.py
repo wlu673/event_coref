@@ -381,7 +381,10 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
                'chunk': 50,
                'nonref': 50,
                'title': 50,
-               'eligible': 50}
+               'eligible': 50,
+               'type': 50,
+               'subtype': 50,
+               'realis': 50}
 
     def create_embedding(fea):
         dim = dim_fea[fea]

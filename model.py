@@ -69,6 +69,7 @@ def non_consecutive_cnn(model):
     X = get_concatenation(model.container['embeddings'],
                           model.container['vars'],
                           model.args['features'],
+                          dim_num = 3,
                           transpose=False)
 
     rep_cnn = non_consecutive_cnn_driver(X,
@@ -86,23 +87,27 @@ def non_consecutive_cnn(model):
     return rep_cnn, dim_cnn
 
 
-def get_concatenation(embeddings, vars, features, transpose=False):
+def get_concatenation(embeddings, variables, features, dim_num=3, transpose=False):
     reps = []
 
     for fea in features:
         if features[fea] == 0:
-            var = vars[fea] if not transpose else vars[fea].T
-            reps += [embeddings[fea][var]]
+            v = variables[fea]
+            if not transpose:
+                reps += [embeddings[fea][v]]
+            else:
+                reps += [embeddings[fea][v.T]] if dim_num == 3 else [embeddings[fea][v].dimshuffle(1, 0)]
         elif features[fea] == 1:
             if not transpose:
-                reps += [vars[fea]]
+                reps += [variables[fea]]
             else:
-                reps += [vars[fea].dimshuffle(1, 0, 2)]
+                reps += [variables[fea].dimshuffle(1, 0, 2)] if dim_num == 3 else [variables[fea].dimshuffle(1, 0)]
 
     if len(reps) == 1:
         X = reps[0]
     else:
-        X = T.cast(T.concatenate(reps, axis=2), dtype=theano.config.floatX)
+        axis = 2 if dim_num == 3 else 1
+        X = T.cast(T.concatenate(reps, axis=axis), dtype=theano.config.floatX)
     return X
 
 
@@ -352,14 +357,17 @@ class MainModel(object):
 
         rep_cnn, dim_cnn = self.get_cnn_rep()
         local_score = self.get_local_score(rep_cnn, dim_cnn)
-
         global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
-        self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
+
         # self.train = self.build_train(local_score, global_score)
+
+        self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
 
         self.container['set_zero'] = OrderedDict()
         self.container['zero_vecs'] = OrderedDict()
         for ed in self.container['embeddings']:
+            if ed == 'realis':
+                continue
             self.container['zero_vecs'][ed] = np.zeros(self.args['embeddings'][ed].shape[1]).astype(theano.config.floatX)
             self.container['set_zero'][ed] = \
                 theano.function([self.container['zero_vector']],
@@ -368,8 +376,6 @@ class MainModel(object):
                                                           self.container['zero_vector']))])
 
         self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
-
-        self.get_params = theano.function([], self.container['params'])
 
     def prepare_features(self, header_width = 60):
         self.container['fea_dim'] = 0
@@ -393,6 +399,27 @@ class MainModel(object):
                 print 'Using feature \'%s\' with dimension %d' % (fea, dim_added)
 
         print 'Total feature dimension:', self.container['fea_dim']
+
+        print 'Event Features'.center(header_width, '-')
+        self.container['fea_event_dim'] = 0
+        if len(self.args['features_event']) > 0:
+            for fea in self.args['features_event']:
+                if self.args['features_event'][fea] == 0:
+                    self.container['embeddings'][fea] = theano.shared(
+                        self.args['embeddings'][fea].astype(theano.config.floatX))
+
+                    if self.args['update_embs']:
+                        self.container['params'] += [self.container['embeddings'][fea]]
+                        self.container['names'] += [fea]
+
+                if self.args['features_event'][fea] >= 0:
+                    dim_added = self.args['features_dim'][fea]
+                    self.container['fea_event_dim'] += dim_added
+                    self.container['vars'][fea] = T.ivector() if self.args['features_event'][fea] == 0 else T.matrix()
+                    print 'Using event feature \'%s\' with dimension %d' % (fea, dim_added)
+        else:
+            print 'No event features used'
+
         print '-' * header_width
 
     def define_vars(self):
@@ -418,6 +445,15 @@ class MainModel(object):
         if self.args['dropout'] > 0:
             rep_inter = dropout_from_layer(self.args['rng'], [rep_inter], self.args['dropout'])[0]
 
+        if len(self.args['features_event']) > 0:
+            rep_event = get_concatenation(self.container['embeddings'],
+                                          self.container['vars'],
+                                          self.args['features_event'],
+                                          dim_num=2,
+                                          transpose=False)
+            rep_inter = T.concatenate([rep_inter, rep_event], axis=1)
+            dim_inter += self.container['fea_event_dim']
+
         dim_hids = [dim_inter] + self.args['multilayer_nn']
 
         rep_cnn = multi_hidden_layers([rep_inter],
@@ -442,11 +478,13 @@ class MainModel(object):
         total_score = local_score + global_score
         latent_score, alpha, latent_inst = self.get_latent(total_score)
         cost = T.sum(T.max(alpha * (1 + total_score - latent_score), axis=1))
-        # cost = T.max(alpha * (1 + total_score - latent_score), axis=1)
         gradients = T.grad(cost, self.container['params'])
+
         # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
 
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
+                   if self.args['features_event'][ed] >= 0]
         inputs += [self.container['prev_inst'],
                    self.container['cluster'],
                    self.container['current_hv'],
@@ -456,7 +494,7 @@ class MainModel(object):
                    self.container['prev_inst_cluster_gold'],
                    self.container['alpha']]
 
-        # return theano.function(inputs, outputs=total_score, on_unused_input='warn')
+        # return theano.function(inputs, outputs=cost, on_unused_input='warn')
         # return theano.function(inputs, outputs=[latent_inst, alpha], on_unused_input='warn')
         # return theano.function(inputs, gradients, on_unused_input='warn')
 
@@ -550,7 +588,7 @@ class MainModel(object):
             indices_new_cluster = T.nonzero(T.eq(ante_cluster_raw, 0))
             ante_cluster = T.set_subtensor(ante_cluster_raw[indices_new_cluster], current_cluster[indices_new_cluster])
 
-            current_cluster = T.set_subtensor(current_cluster[indices_new_cluster], current_cluster[indices_new_cluster] + 1)
+            current_cluster = T.set_subtensor(current_cluster[indices_new_cluster], current_cluster[indices_new_cluster]+1)
             prev_inst_cluster = T.set_subtensor(prev_inst_cluster[:, curr_inst], ante_cluster)
 
             ante_hv = current_hv[indices_single, ante_cluster-1]
@@ -558,7 +596,7 @@ class MainModel(object):
 
             return current_hv, prev_inst_cluster, current_cluster
 
-        ini_current_hv = np.array([[[0.] * dim_cnn] * self.args['max_cluster_in_doc']]
+        ini_current_hv = np.array([[[0.] * dim_cnn] * self.args['max_inst_in_doc']]
                                   * self.args['batch']).astype(theano.config.floatX)
         ini_prev_inst_cluster = np.array([[-1] * self.args['max_inst_in_doc']] * self.args['batch'], dtype='int32')
         ini_current_cluster = np.array([1] * self.args['batch'], dtype='int32')
@@ -568,6 +606,8 @@ class MainModel(object):
                              outputs_info=[ini_current_hv, ini_prev_inst_cluster, ini_current_cluster])
 
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
+                   if self.args['features_event'][ed] >= 0]
         inputs += [self.container['prev_inst'], self.container['anchor_position']]
 
         return theano.function(inputs, ret[1][-1], on_unused_input='warn')

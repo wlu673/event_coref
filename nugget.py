@@ -20,7 +20,7 @@ def prepare_word_embeddings(with_word_embs, embeddings):
     embeddings['word'] = word_vecs
 
 
-def prepare_features(expected_features):
+def prepare_features(expected_features, expected_features_event):
     if expected_features['dep'] >= 0:
         expected_features['dep'] = 1
     if expected_features['possibleTypes'] >= 0:
@@ -34,10 +34,19 @@ def prepare_features(expected_features):
             print 'Using feature: %-10s - embeddings' % fea
         elif expected_features[fea] == 1:
             print 'Using feature: %-10s - binary' % fea
-    return features
+
+    features_event = OrderedDict()
+    for fea in expected_features_event:
+        features_event[fea] = expected_features_event[fea]
+        if expected_features_event[fea] == 0:
+            print 'Using feature: %-10s - embeddings' % fea
+        elif expected_features_event[fea] == 1:
+            print 'Using feature: %-10s - binary' % fea
+
+    return features, features_event
 
 
-def get_dim_mapping(embeddings, map_fea_to_index, features):
+def get_dim_mapping(embeddings, map_fea_to_index, features, features_event):
     map_dim_emb, map_dim_bin = {}, {}
     for fea in features:
         if not fea == 'dep' and not fea == 'possibleTypes':
@@ -51,10 +60,15 @@ def get_dim_mapping(embeddings, map_fea_to_index, features):
         else:
             binary_dim = len(map_fea_to_index[fea]) - 1
         map_dim_bin[fea] = binary_dim
+
+    for fea in features_event:
+        map_dim_bin[fea] = len(map_fea_to_index[fea]) if fea == 'realis' else len(map_fea_to_index[fea])-1
+        map_dim_emb[fea] = embeddings[fea].shape[1]
+
     return map_dim_emb, map_dim_bin
 
 
-def prepare_data(max_lengths, corpora, map_fea_to_index, features, map_dim_bin, alphas):
+def prepare_data(max_lengths, corpora, map_fea_to_index, features, features_event, map_dim_bin, alphas):
     data_sets = {}
     for corpus in corpora:
         data_sets[corpus] = []
@@ -65,14 +79,14 @@ def prepare_data(max_lengths, corpora, map_fea_to_index, features, map_dim_bin, 
             data_doc = defaultdict(list)
             inst_in_doc = corpora[corpus][doc]['instances']
             for inst in inst_in_doc:
-                ret = add_instance(data_doc, inst, map_fea_to_index, features, map_dim_bin)
+                ret = add_instance(data_doc, inst, map_fea_to_index, features, features_event, map_dim_bin)
                 if not ret == True:
                     print 'Error in %s corpus in document %s: cannot find index for word %s\n', corpus, doc, ret
                     exit(0)
             num_placeholder = max_lengths['instance'] - len(inst_in_doc)
             window = len(inst_in_doc[0]['word'])
             for i in range(num_placeholder):
-                add_instance_placeholder(data_doc, features, map_fea_to_index, map_dim_bin, window)
+                add_instance_placeholder(data_doc, features, features_event, map_fea_to_index, map_dim_bin, window)
 
             prev_inst = [0] + [-1] * (max_lengths['instance'] - 1)
             mask_prev_inst = [0] * max_lengths['instance']
@@ -97,7 +111,7 @@ def prepare_data(max_lengths, corpora, map_fea_to_index, features, map_dim_bin, 
     return data_sets
 
 
-def add_instance(data_doc, inst, map_fea_to_index, features, map_dim_bin):
+def add_instance(data_doc, inst, map_fea_to_index, features, features_event, map_dim_bin):
     num_possible_types = len(map_fea_to_index['possibleTypes'])
     num_dep = len(map_fea_to_index['dep'])
 
@@ -130,17 +144,27 @@ def add_instance(data_doc, inst, map_fea_to_index, features, map_dim_bin):
             fea_scalar = inst[fea][index]
             fea_vector = [0] * map_dim_bin[fea]
             if fea_scalar > 0:
-                fea_vector[0] = fea_scalar - 1
+                fea_vector[fea_scalar - 1] = 1
             data_inst[fea].append(fea_vector if features[fea] == 1 else fea_scalar)
 
     for fea in data_inst:
         data_doc[fea] += [data_inst[fea]]
+
+    for fea in features_event:
+        fea_scalar = inst[fea]
+        fea_vector = [0] * map_dim_bin[fea]
+        if fea == 'realis':
+            fea_vector[fea_scalar] = 1
+        else:
+            fea_vector[fea_scalar-1] = 1
+        data_doc[fea].append(fea_vector if features_event[fea] == 1 else fea_scalar)
+
     data_doc['anchor_position'] += [inst['anchor']]
 
     return True
 
 
-def add_instance_placeholder(data_doc, features, map_fea_to_index, map_dim_bin, window):
+def add_instance_placeholder(data_doc, features, features_event, map_fea_to_index, map_dim_bin, window):
     num_possible_types = len(map_fea_to_index['possibleTypes'])
     num_dep = len(map_fea_to_index['dep'])
 
@@ -163,11 +187,17 @@ def add_instance_placeholder(data_doc, features, map_fea_to_index, map_dim_bin, 
                 continue
 
             fea_scalar = 0
-            fea_vector = [0] * map_dim_bin[fea]
+            fea_vector = [0] * (map_dim_bin[fea]-1)
             data_inst[fea].append(fea_vector if features[fea] == 1 else fea_scalar)
 
     for fea in data_inst:
         data_doc[fea] += [data_inst[fea]]
+
+    for fea in features_event:
+        fea_scalar = 0
+        fea_vector = [0] * map_dim_bin[fea]
+        data_doc[fea].append(fea_vector if features_event[fea] == 1 else fea_scalar)
+
     data_doc['anchor_position'] += [0]
 
 
@@ -253,16 +283,17 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('pos', -1),
                                         ('chunk', -1),
                                         ('possibleTypes', -1),
-                                        ('dep', 1),
+                                        ('dep', -1),
                                         ('nonref', -1),
                                         ('title', -1),
                                         ('eligible', -1)]),
+         expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
          with_word_embs=True,
          update_embs=True,
          cnn_filter_num=300,
          cnn_filter_wins=[2, 3, 4, 5],
          dropout=0.,
-         multilayer_nn=[300],
+         multilayer_nn=[600, 300],
          dim_cnn=300,
          optimizer='adadelta',
          lr=0.01,
@@ -274,9 +305,9 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(dataset_path, 'rb'))
 
     prepare_word_embeddings(with_word_embs, embeddings)
-    features = prepare_features(expected_features)
-    map_dim_emb, map_dim_bin = get_dim_mapping(embeddings, map_fea_to_index, features)
-    data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, map_dim_bin, alphas)
+    features, features_event = prepare_features(expected_features, expected_features_event)
+    map_dim_emb, map_dim_bin = get_dim_mapping(embeddings, map_fea_to_index, features, features_event)
+    data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, features_event, map_dim_bin, alphas)
     data_train = data_sets['train']
 
     features_dim = OrderedDict([('word', map_dim_emb['word'])])
@@ -287,9 +318,17 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
         elif expected_features[fea] == 0:
             fea_dim = map_dim_emb[fea]
         features_dim[fea] = fea_dim
+    for fea in expected_features_event:
+        fea_dim = 0
+        if expected_features_event[fea] == 1:
+            fea_dim = map_dim_bin[fea]
+        elif expected_features_event[fea] == 0:
+            fea_dim = map_dim_emb[fea]
+        features_dim[fea] = fea_dim
 
     params = {'embeddings': embeddings,
               'features': features,
+              'features_event': features_event,
               'features_dim': features_dim,
               'window': window,
               'update_embs': update_embs,
@@ -310,6 +349,8 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     for i, doc in enumerate(data_train):
         for fea in features:
             features_batch[fea] += doc[fea]
+        for fea in features_event:
+            features_batch[fea] += doc[fea]
         for item in ['prev_inst', 'cluster', 'current_hv']:
             inputs_batch[item] += [doc[item] + doc['mask_' + item] * batch * i]
         for item in ['mask_rnn', 'prev_inst_cluster', 'anchor_position']:
@@ -322,6 +363,11 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
         if features[fea] == 0:
             inputs_test += [np.array(features_batch[fea], dtype='int32')]
         elif features[fea] == 1:
+            inputs_test += [np.array(features_batch[fea]).astype(theano.config.floatX)]
+    for fea in features_event:
+        if features_event[fea] == 0:
+            inputs_test += [np.array(features_batch[fea], dtype='int32')]
+        elif features_event[fea] == 1:
             inputs_test += [np.array(features_batch[fea]).astype(theano.config.floatX)]
     inputs_test += [np.concatenate(inputs_batch['prev_inst'])]
 
@@ -336,41 +382,45 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     inputs_train += [np.concatenate(inputs_batch['prev_inst_cluster_gold'])]
     inputs_train += [np.concatenate(inputs_batch['alpha'])]
 
-    # inputs_names = ['word']
-    # for fea in expected_features:
-    #     if expected_features[fea] >= 0:
-    #         inputs_names += [fea]
-    # inputs_names += ['prev_inst', 'cluster', 'current_hv', 'mask_rnn', 'prev_inst_cluster', 'anchor_position', 'prev_inst_cluster_gold', 'alpha']
+    print inputs_train[-4]
+
+    # # inputs_names = ['word']
+    # # for fea in expected_features:
+    # #     if expected_features[fea] >= 0:
+    # #         inputs_names += [fea]
+    # # inputs_names += ['prev_inst', 'cluster', 'current_hv', 'mask_rnn', 'prev_inst_cluster', 'anchor_position', 'prev_inst_cluster_gold', 'alpha']
+    # #
+    # # print '\n', ' Shapes '.center(120, '='), '\n'
+    # # for name, var in zip(inputs_names, inputs_train):
+    # #     print name, ':', var.shape
+    # # print '\n', ' Embeddings Dim '.center(120, '='), '\n'
+    # # print map_dim_emb
+    # # print '\n', ' Binary Dim '.center(120, '='), '\n'
+    # # print map_dim_bin
+    # # print '\n', ' Max Lengths '.center(120, '='), '\n'
+    # # print 'Instance in doc =', max_lengths['instance']
+    # # print 'Cluster in doc =', max_lengths['cluster']
     #
-    # print '\n', ' Shapes '.center(120, '='), '\n'
-    # for name, var in zip(inputs_names, inputs_train):
-    #     print name, ':', var.shape
-    # print '\n', ' Embeddings Dim '.center(120, '='), '\n'
-    # print map_dim_emb
-    # print '\n', ' Binary Dim '.center(120, '='), '\n'
-    # print map_dim_bin
-    # print '\n', ' Max Lengths '.center(120, '='), '\n'
-    # print 'Instance in doc =', max_lengths['instance']
-    # print 'Cluster in doc =', max_lengths['cluster']
-
-    print '\nBuilding model ...\n'
-    model = MainModel(params)
-
-    # print model.train(*inputs_train)
-
-    print '\nTraining ...\n'
-    for i in range(300):
-        cost = model.f_grad_shared(*inputs_train)
-        model.f_update_param(params['lr'])
-
-        for fea in model.container['embeddings']:
-            model.container['set_zero'][fea](model.container['zero_vecs'][fea])
-        print '>>> Epoch', i, ': cost = ', cost
-
-        if cost == 0.:
-            break
-
-    print model.test(*inputs_test)
+    # print '\nBuilding model ...\n'
+    # model = MainModel(params)
+    #
+    # # print model.train(*inputs_train)
+    #
+    # print '\nTraining ...\n'
+    # for i in range(600):
+    #     cost = model.f_grad_shared(*inputs_train)
+    #     model.f_update_param(params['lr'])
+    #
+    #     for fea in model.container['embeddings']:
+    #         if fea == 'realis':
+    #             continue
+    #         model.container['set_zero'][fea](model.container['zero_vecs'][fea])
+    #     print '>>> Epoch', i, ': cost = ', cost
+    #
+    #     if cost < 4.:
+    #         break
+    #
+    # print model.test(*inputs_test)
 
 if __name__ == '__main__':
     main()
