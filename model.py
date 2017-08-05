@@ -375,9 +375,9 @@ class MainModel(object):
                                           T.set_subtensor(self.container['embeddings'][ed][0, :],
                                                           self.container['zero_vector']))])
 
-        self.test = self.build_test(rep_cnn, dim_cnn, local_score, gru_params)
+        self.predict = self.build_predict(rep_cnn, dim_cnn, local_score, gru_params)
 
-    def prepare_features(self, header_width = 60):
+    def prepare_features(self, header_width=80):
         self.container['fea_dim'] = 0
         self.container['params'], self.container['names'] = [], []
         self.container['embeddings'], self.container['vars'] = OrderedDict(), OrderedDict()
@@ -548,7 +548,7 @@ class MainModel(object):
 
         return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha, latent_inst
 
-    def build_test(self, rep_cnn, dim_cnn, local_score, gru_params):
+    def build_predict(self, rep_cnn, dim_cnn, local_score, gru_params):
         Wc, bc, Uc, Wx, Ux, bx = gru_params
 
         def _slice(_x, n):

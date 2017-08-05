@@ -1,6 +1,9 @@
 from collections import OrderedDict, defaultdict
 import numpy as np
 import cPickle
+import subprocess
+import random
+import time
 import theano
 from model import *
 
@@ -276,40 +279,7 @@ def get_penalty_rates(inst_init, max_lengths, alphas):
     return penalty_rates
 
 
-def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
-         window=31,
-         wed_window=2,
-         expected_features=OrderedDict([('anchor', 0),
-                                        ('pos', -1),
-                                        ('chunk', -1),
-                                        ('possibleTypes', -1),
-                                        ('dep', -1),
-                                        ('nonref', -1),
-                                        ('title', -1),
-                                        ('eligible', -1)]),
-         expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
-         with_word_embs=True,
-         update_embs=True,
-         cnn_filter_num=300,
-         cnn_filter_wins=[2, 3, 4, 5],
-         dropout=0.,
-         multilayer_nn=[600, 300],
-         dim_cnn=300,
-         optimizer='adadelta',
-         lr=0.01,
-         norm_lim=0.,
-         alphas=(0.5, 1.2, 1),
-         batch=3):
-
-    print 'Loading dataset:', dataset_path, '...'
-    max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(dataset_path, 'rb'))
-
-    prepare_word_embeddings(with_word_embs, embeddings)
-    features, features_event = prepare_features(expected_features, expected_features_event)
-    map_dim_emb, map_dim_bin = get_dim_mapping(embeddings, map_fea_to_index, features, features_event)
-    data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, features_event, map_dim_bin, alphas)
-    data_train = data_sets['train']
-
+def get_features_dim(expected_features, expected_features_event, map_dim_bin, map_dim_emb):
     features_dim = OrderedDict([('word', map_dim_emb['word'])])
     for fea in expected_features:
         fea_dim = 0
@@ -325,6 +295,295 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
         elif expected_features_event[fea] == 0:
             fea_dim = map_dim_emb[fea]
         features_dim[fea] = fea_dim
+    return features_dim
+
+
+def prepare_realis_output(path_realis, data_eval):
+    realis_ouput = dict()
+    with open(path_realis + data_eval + '.realis', 'r') as fin:
+        current_doc = ''
+        body = []
+        for line in fin:
+            if not line:
+                continue
+            if line.startswith('#BeginOfDocument'):
+                current_doc = line.rstrip('\n').split()[1]
+            elif line.startswith('#EndOfDocument'):
+                realis_ouput[current_doc] = body
+                body = []
+            elif line.startswith('@Coreference'):
+                continue
+            else:
+                body += [line]
+    return realis_ouput
+
+
+def fit_data_to_batch(data, batch):
+    if len(data) % batch > 0:
+        num_to_add = batch - len(data) % batch
+        np.random.seed(3435)
+        data_fitted = data + np.random.permutation(data)[: num_to_add]
+    else:
+        num_to_add = 0
+        data_fitted = data
+    return data_fitted, num_to_add
+
+
+def get_batch_inputs(data, features, features_event, batch):
+    features_batch, inputs_batch = defaultdict(list), defaultdict(list)
+    for i, doc in enumerate(data):
+        for fea in features:
+            features_batch[fea] += doc[fea]
+        for fea in features_event:
+            features_batch[fea] += doc[fea]
+        for item in ['prev_inst', 'cluster', 'current_hv']:
+            inputs_batch[item] += [doc[item] + doc['mask_' + item] * batch * i]
+        for item in ['mask_rnn', 'prev_inst_cluster', 'anchor_position']:
+            inputs_batch[item] += doc[item]
+        inputs_batch['prev_inst_cluster_gold'] += [doc['prev_inst_cluster_gold']]
+        inputs_batch['alpha'] += [doc['alpha']]
+
+    return features_batch, inputs_batch
+
+
+def get_train_inputs(data, features, features_event, batch):
+    features_batch, inputs_batch = get_batch_inputs(data, features, features_event, batch)
+
+    inputs = []
+    for fea in features:
+        if features[fea] == 0:
+            inputs += [np.array(features_batch[fea], dtype='int32')]
+        elif features[fea] == 1:
+            inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
+    for fea in features_event:
+        if features_event[fea] == 0:
+            inputs += [np.array(features_batch[fea], dtype='int32')]
+        elif features_event[fea] == 1:
+            inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
+    inputs += [np.concatenate(inputs_batch['prev_inst'])]
+
+    for item in ['cluster', 'current_hv']:
+        inputs += [np.concatenate(inputs_batch[item])]
+    inputs += [np.array(inputs_batch['mask_rnn'], dtype=theano.config.floatX)]
+    for item in ['prev_inst_cluster', 'anchor_position']:
+        inputs += [np.array(inputs_batch[item], dtype='int32')]
+    inputs += [np.concatenate(inputs_batch['prev_inst_cluster_gold'])]
+    inputs += [np.concatenate(inputs_batch['alpha'])]
+
+    return inputs
+
+
+def get_pred_inputs(data, features, features_event, batch):
+    features_batch, inputs_batch = get_batch_inputs(data, features, features_event, batch)
+
+    inputs = []
+    for fea in features:
+        if features[fea] == 0:
+            inputs += [np.array(features_batch[fea], dtype='int32')]
+        elif features[fea] == 1:
+            inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
+    for fea in features_event:
+        if features_event[fea] == 0:
+            inputs += [np.array(features_batch[fea], dtype='int32')]
+        elif features_event[fea] == 1:
+            inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
+    inputs += [np.concatenate(inputs_batch['prev_inst'])]
+    inputs += [np.array(inputs_batch['anchor_position'], dtype='int32')]
+
+    return inputs
+
+
+def train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose):
+    print (' Training in epoch %d ' % epoch).center(80, '-')
+    time_start = time.time()
+    for index, batch_index in enumerate(np.random.permutation(range(num_batch))):
+        inputs_train = get_train_inputs(data_train[batch_index * batch: (batch_index + 1) * batch],
+                                        features,
+                                        features_event,
+                                        batch)
+        cost = model.f_grad_shared(*inputs_train)
+        model.f_update_param(params['lr'])
+        for fea in model.container['embeddings']:
+            if fea == 'realis':
+                continue
+            model.container['set_zero'][fea](model.container['zero_vecs'][fea])
+        if verbose:
+            print 'Epoch %d Mini-batch %d: cost = %.2f' % (epoch, index, cost)  # time.time() - time_start
+
+
+def predict(model, data, features, features_event, batch):
+    num_batch = len(data) / batch
+    predictions = []
+    for batch_index in range(num_batch):
+        inputs_pred = get_pred_inputs(data, features, features_event, batch)
+        cluster_batch = model.predict(*inputs_pred)
+        for doc_index in range(cluster_batch.shape[0]):
+            doc = data[batch_index * batch + doc_index]
+            inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
+            coref = defaultdict(list)
+            for inst_index in range(len(inst_index_to_id)):
+                coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
+            predictions += [coref.values()]
+    return predictions
+
+
+def write_out(epoch, data_eval, data, predictions, realis_output, path_out):
+    with open(path_out + data_eval + '.coref.pred' + str(epoch), 'w') as fout:
+        for doc, coref in zip(data, predictions):
+            fout.write('#BeginOfDocument\t' + doc['doc_id'] + '\n')
+            for line in realis_output[doc['doc_id']]:
+                fout.write(line)
+            for cluster_index, chain in enumerate(coref):
+                fout.write('@Coreference\tC%d\t' % cluster_index)
+                chain_str = ''
+                for inst in chain:
+                    chain_str += 'E' + inst.split('-')[1] + ','
+                fout.write(chain_str[:-1] + '\n')
+            fout.write('#EndOfDocument')
+
+
+def get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp):
+    proc = subprocess.Popen(
+        ["python", path_scorer, "-g", path_golden, "-s", path_output, "-t", path_token, "-c", path_conllTemp],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE)
+    ous, _ = proc.communicate()
+
+    spanP, spanR, spanF1 = 0.0, 0.0, 0.0
+    subtypeP, subtypeR, subtypeF1 = 0.0, 0.0, 0.0
+    realisP, realisR, realisF1 = 0.0, 0.0, 0.0
+    realisAndTypeP, realisAndTypeR, realisAndTypeF1 = 0.0, 0.0, 0.0
+    bcub, ceafe, ceafm, muc, blanc, averageCoref = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    startMentionScoring = False
+    startCoreferenceScoring = False
+    for line in ous.split('\n'):
+        line = line.strip()
+        if line == '=======Final Mention Detection Results=========':
+            startMentionScoring = True
+            startCoreferenceScoring = False
+            continue
+        if line == '=======Final Mention Coreference Results=========':
+            startMentionScoring = False
+            startCoreferenceScoring = True
+            continue
+        if not startMentionScoring and not startCoreferenceScoring: continue
+        if startMentionScoring and line.startswith('plain'):
+            els = line.split('\t')
+            spanP, spanR, spanF1 = float(els[1]), float(els[2]), float(els[3])
+            continue
+        if startMentionScoring and line.startswith('mention_type') and not line.startswith(
+                'mention_type+realis_status'):
+            els = line.split('\t')
+            subtypeP, subtypeR, subtypeF1 = float(els[1]), float(els[2]), float(els[3])
+            continue
+        if startMentionScoring and line.startswith('realis_status'):
+            els = line.split('\t')
+            realisP, realisR, realisF1 = float(els[1]), float(els[2]), float(els[3])
+            continue
+        if startMentionScoring and line.startswith('mention_type+realis_status'):
+            els = line.split('\t')
+            realisAndTypeP, realisAndTypeR, realisAndTypeF1 = float(els[1]), float(els[2]), float(els[3])
+            continue
+        if startCoreferenceScoring and 'bcub' in line:
+            els = line.split()
+            bcub = float(els[4])
+            continue
+        if startCoreferenceScoring and 'ceafe' in line:
+            els = line.split()
+            ceafe = float(els[4])
+            continue
+        if startCoreferenceScoring and 'ceafm' in line:
+            els = line.split()
+            ceafm = float(els[4])
+            continue
+        if startCoreferenceScoring and 'muc' in line:
+            els = line.split()
+            muc = float(els[4])
+            continue
+        if startCoreferenceScoring and 'blanc' in line:
+            els = line.split()
+            blanc = float(els[4])
+            continue
+        if startCoreferenceScoring and 'Overall Average CoNLL score' in line:
+            els = line.split()
+            averageCoref = float(els[4])
+            continue
+
+    return OrderedDict({'spanP': spanP, 'spanR': spanR, 'spanF1': spanF1,
+                        'typeP': subtypeP, 'typeR': subtypeR, 'typeF1': subtypeF1,
+                        'subtypeP': subtypeP, 'subtypeR': subtypeR, 'subtypeF1': subtypeF1,
+                        'realisP': realisP, 'realisR': realisR, 'realisF1': realisF1,
+                        'realisAndTypeP': realisAndTypeP, 'realisAndTypeR': realisAndTypeR,
+                        'realisAndTypeF1': realisAndTypeF1,
+                        'bcub': bcub, 'ceafe': ceafe, 'ceafm': ceafm, 'muc': muc, 'blanc': blanc,
+                        'averageCoref': averageCoref})
+
+
+def print_perf(performance, msg):
+    print (' ' + msg + ' ').center(80, '-')
+
+    print 'plain: ', str(performance['spanP']) + '\t' + str(performance['spanR']) + '\t' + str(performance['spanF1'])
+    print 'mention_type: ', str(performance['typeP']) + '\t' + str(performance['typeR']) + '\t' + str(
+        performance['typeF1'])
+    print 'mention_subtype: ', str(performance['subtypeP']) + '\t' + str(performance['subtypeR']) + '\t' + str(
+        performance['subtypeF1'])
+    print 'realis_status: ', str(performance['realisP']) + '\t' + str(performance['realisR']) + '\t' + str(
+        performance['realisF1'])
+    print 'mention_type+realis_status: ', str(performance['realisAndTypeP']) + '\t' + str(
+        performance['realisAndTypeR']) + '\t' + str(performance['realisAndTypeF1'])
+    print 'bcub: ', performance['bcub']
+    print 'ceafe: ', performance['ceafe']
+    print 'ceafm: ', performance['ceafm']
+    print 'muc: ', performance['muc']
+    print 'blanc: ', performance['blanc']
+    print 'averageCoref: ', performance['averageCoref']
+
+    print '-' * 80
+
+
+def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
+         path_realis='/scratch/wl1191/event_coref/data/realis/',
+         path_golden='/scratch/wl1191/event_coref/data/eval.tbf',
+         path_token='/scratch/wl1191/event_coref/data/tkn/',
+         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
+         path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
+         path_out='/scratch/wl1191/event_coref/out/',
+         window=31,
+         wed_window=2,
+         expected_features=OrderedDict([('anchor', 0),
+                                        ('pos', -1),
+                                        ('chunk', -1),
+                                        ('possibleTypes', -1),
+                                        ('dep', -1),
+                                        ('nonref', -1),
+                                        ('title', -1),
+                                        ('eligible', -1)]),
+         expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
+         with_word_embs=True,
+         update_embs=True,
+         cnn_filter_num=10,
+         cnn_filter_wins=[2],
+         dropout=0.,
+         multilayer_nn=[50],
+         dim_cnn=50,
+         optimizer='adadelta',
+         lr=0.01,
+         lr_decay=False,
+         norm_lim=0.,
+         alphas=(0.5, 1.2, 1),
+         batch=3,
+         nepochs=10,
+         seed=3435,
+         verbose=True):
+
+    print '\nLoading dataset:', path_dataset, '...\n'
+    max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(path_dataset, 'rb'))
+
+    prepare_word_embeddings(with_word_embs, embeddings)
+    features, features_event = prepare_features(expected_features, expected_features_event)
+    map_dim_emb, map_dim_bin = get_dim_mapping(embeddings, map_fea_to_index, features, features_event)
+    data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, features_event, map_dim_bin, alphas)
+    features_dim = get_features_dim(expected_features, expected_features_event, map_dim_bin, map_dim_emb)
 
     params = {'embeddings': embeddings,
               'features': features,
@@ -345,67 +604,21 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
               'max_inst_in_doc': max_lengths['instance'],
               'max_cluster_in_doc': max_lengths['cluster']}
 
-    features_batch, inputs_batch = defaultdict(list), defaultdict(list)
-    for i, doc in enumerate(data_train):
-        for fea in features:
-            features_batch[fea] += doc[fea]
-        for fea in features_event:
-            features_batch[fea] += doc[fea]
-        for item in ['prev_inst', 'cluster', 'current_hv']:
-            inputs_batch[item] += [doc[item] + doc['mask_' + item] * batch * i]
-        for item in ['mask_rnn', 'prev_inst_cluster', 'anchor_position']:
-            inputs_batch[item] += doc[item]
-        inputs_batch['prev_inst_cluster_gold'] += [doc['prev_inst_cluster_gold']]
-        inputs_batch['alpha'] += [doc['alpha']]
+    data_train, _ = fit_data_to_batch(data_sets['train'], batch)
+    num_batch = len(data_train) / batch
+    print 'Number of batches:', num_batch, '\n'
 
-    inputs_test = []
-    for fea in features:
-        if features[fea] == 0:
-            inputs_test += [np.array(features_batch[fea], dtype='int32')]
-        elif features[fea] == 1:
-            inputs_test += [np.array(features_batch[fea]).astype(theano.config.floatX)]
-    for fea in features_event:
-        if features_event[fea] == 0:
-            inputs_test += [np.array(features_batch[fea], dtype='int32')]
-        elif features_event[fea] == 1:
-            inputs_test += [np.array(features_batch[fea]).astype(theano.config.floatX)]
-    inputs_test += [np.concatenate(inputs_batch['prev_inst'])]
+    print 'Loading realis outputs ...'
+    realis_outputs = {'valid': prepare_realis_output(path_realis, 'valid'),
+                      'test': prepare_realis_output(path_realis, 'test')}
 
-    inputs_train = inputs_test[:]
-    inputs_test += [np.array(inputs_batch['anchor_position'], dtype='int32')]
+    print '\nBuilding model ...\n'
+    np.random.seed(seed)
+    random.seed(seed)
+    model = MainModel(params)
 
-    for item in ['cluster', 'current_hv']:
-        inputs_train += [np.concatenate(inputs_batch[item])]
-    inputs_train += [np.array(inputs_batch['mask_rnn'], dtype=theano.config.floatX)]
-    for item in ['prev_inst_cluster', 'anchor_position']:
-        inputs_train += [np.array(inputs_batch[item], dtype='int32')]
-    inputs_train += [np.concatenate(inputs_batch['prev_inst_cluster_gold'])]
-    inputs_train += [np.concatenate(inputs_batch['alpha'])]
+    # print model.train(*inputs_train)
 
-    print inputs_train[-4]
-
-    # # inputs_names = ['word']
-    # # for fea in expected_features:
-    # #     if expected_features[fea] >= 0:
-    # #         inputs_names += [fea]
-    # # inputs_names += ['prev_inst', 'cluster', 'current_hv', 'mask_rnn', 'prev_inst_cluster', 'anchor_position', 'prev_inst_cluster_gold', 'alpha']
-    # #
-    # # print '\n', ' Shapes '.center(120, '='), '\n'
-    # # for name, var in zip(inputs_names, inputs_train):
-    # #     print name, ':', var.shape
-    # # print '\n', ' Embeddings Dim '.center(120, '='), '\n'
-    # # print map_dim_emb
-    # # print '\n', ' Binary Dim '.center(120, '='), '\n'
-    # # print map_dim_bin
-    # # print '\n', ' Max Lengths '.center(120, '='), '\n'
-    # # print 'Instance in doc =', max_lengths['instance']
-    # # print 'Cluster in doc =', max_lengths['cluster']
-    #
-    # print '\nBuilding model ...\n'
-    # model = MainModel(params)
-    #
-    # # print model.train(*inputs_train)
-    #
     # print '\nTraining ...\n'
     # for i in range(600):
     #     cost = model.f_grad_shared(*inputs_train)
@@ -421,6 +634,49 @@ def main(dataset_path='/scratch/wl1191/event_coref/data/nugget.pkl',
     #         break
     #
     # print model.test(*inputs_test)
+
+    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
+                                  ('test', fit_data_to_batch(data_sets['test'], batch))])
+    predictions = OrderedDict()
+
+    best_f1 = -np.inf
+    best_performance = None
+    best_epoch = -1
+    curr_lr = lr
+    print 'Training ...'
+    for epoch in xrange(nepochs):
+        train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
+
+        print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+        for data_eval in data_sets_eval:
+            data, num_added = data_sets_eval[data_eval]
+            predictions[data_eval] = predict(model, data, features, features_event, batch)
+            if num_added > 0:
+                predictions[data_eval] = predictions[data_eval][:-num_added]
+            write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
+
+        path_output = path_out + 'valid.coref.pred' + str(epoch)
+        performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
+
+        if performance['averageCoref'] > best_f1:
+            best_f1 = performance['averageCoref']
+            print 'NEW BEST: Epoch -', epoch
+            if verbose:
+                print_perf(performance, len('Current Performance') * '-')
+
+            best_performance = performance
+            best_epoch = epoch
+
+        # learning rate decay if no improvement in 10 epochs
+        if lr_decay and abs(best_epoch - epoch) >= 10:
+            curr_lr *= 0.5
+        if curr_lr < 1e-5:
+            break
+
+    print '\n', '=' * 80, '\n'
+    print 'BEST RESULT: epoch: ', best_epoch
+    print_perf(best_performance, 'Best Performance')
+
 
 if __name__ == '__main__':
     main()

@@ -3,7 +3,28 @@ import numpy as np
 import cPickle
 
 
-def build_data(src_dir, corpus_type, window):
+###########################################################################
+# Create General Data Sets
+
+def create_general_data_sets(src_dir, w2v_file, corpus_type, window):
+    print "\nLoading raw data..."
+    max_lengths, corpora, map_fea_to_index, vocab = make_data_general(src_dir, corpus_type, window)
+    print "Raw data loaded!"
+
+    W_trained, word_index_map, W_random = create_word_embeddings(src_dir, w2v_file, vocab)
+    map_fea_to_index['word'] = word_index_map
+    embeddings = {'word': W_trained, 'word_random': W_random}
+
+    create_feature_embeddings(map_fea_to_index, embeddings, window)
+
+    print 'Dumping ...'
+    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index],
+                 open(src_dir + '/' + 'nugget.pkl', 'wb'))
+    # cPickle.dump([max_lengths, corpora], open(src_dir + '/' + 'corpora.pkl', 'wb'))
+    print 'General datasets created!'
+
+
+def make_data_general(src_dir, corpus_type, window):
     corpora = {}
     max_lengths = {'sentence': -1,
                    'instance': -1,
@@ -37,7 +58,7 @@ def build_data(src_dir, corpus_type, window):
     for type_ in corpus_type:
         corpora[type_] = {}
         print 'Processing %s data' % type_
-        with open(src_dir + '/raw/sample/' + type_ + '.txt', 'r') as fin:
+        with open(src_dir + '/raw/' + type_ + '.txt', 'r') as fin:
             for line in fin:
                 line = line.strip()
 
@@ -87,6 +108,8 @@ def build_data(src_dir, corpus_type, window):
                     if chain == 'Error':
                         print 'Incorrect coreference format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                         exit(0)
+                    elif chain == 'KeyError':
+                        print 'Key error in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                     corpora[type_][current_doc]['coreference'] += [chain]
                     cluster_in_doc += 1
                     continue
@@ -244,10 +267,13 @@ def parse_coreference(line, inst_id_to_index):
     if len(entries) != 3:
         return 'Error'
 
-    chain = []
-    for event_id in entries[2].split(','):
-        chain += [inst_id_to_index[event_id]]
-    return sorted(chain)
+    try:
+        chain = []
+        for event_id in entries[2].split(','):
+            chain += [inst_id_to_index[event_id]]
+        return sorted(chain)
+    except KeyError:
+        return 'KeyError'
 
 
 def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
@@ -399,29 +425,19 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
-def main():
+###########################################################################
+# Create Coref Data Sets
+
+###########################################################################
+
+
+def main(src_dir = '/scratch/wl1191/event_coref/data',
+         w2v_file = 'GoogleNews-vectors-negative300.bin',
+         corpus_type = ["train", "valid", "test"],
+         window = 31):
     np.random.seed(8989)
 
-    w2v_file = 'GoogleNews-vectors-negative300.bin'
-    src_dir = '/scratch/wl1191/event_coref/data'
-    corpus_type = ["train", "valid", "test"]
-    window = 31
-
-    print "\nLoading data..."
-    max_lengths, corpora, map_fea_to_index, vocab = build_data(src_dir, corpus_type, window)
-    print "Data loaded!"
-
-    W_trained, word_index_map, W_random = create_word_embeddings(src_dir, w2v_file, vocab)
-    map_fea_to_index['word'] = word_index_map
-    embeddings = {'word': W_trained, 'word_random': W_random}
-
-    create_feature_embeddings(map_fea_to_index, embeddings, window)
-
-    print 'Dumping ...'
-    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index],
-                 open(src_dir + '/' + 'nugget.pkl', 'wb'))
-    # cPickle.dump([max_lengths, corpora], open(src_dir + '/' + 'corpora.pkl', 'wb'))
-    print 'Dataset created!'
+    create_general_data_sets(src_dir, w2v_file, corpus_type, window)
 
 
 if __name__ == '__main__':
