@@ -212,6 +212,7 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
     index = 0
     for chain in coref:
         inst_init[chain[0]] = 1
+
         for inst in chain:
             map_inst_to_cluster[inst] = index
 
@@ -322,7 +323,7 @@ def fit_data_to_batch(data, batch):
     if len(data) % batch > 0:
         num_to_add = batch - len(data) % batch
         np.random.seed(3435)
-        data_fitted = data + np.random.permutation(data)[: num_to_add]
+        data_fitted = np.concatenate([data, np.random.permutation(data)[: num_to_add]])
     else:
         num_to_add = 0
         data_fitted = data
@@ -393,29 +394,32 @@ def get_pred_inputs(data, features, features_event, batch):
     return inputs
 
 
-def train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose):
+def train(model, data, params, epoch, features, features_event, batch, num_batch, verbose):
     print (' Training in epoch %d ' % epoch).center(80, '-')
-    time_start = time.time()
     for index, batch_index in enumerate(np.random.permutation(range(num_batch))):
-        inputs_train = get_train_inputs(data_train[batch_index * batch: (batch_index + 1) * batch],
+        time_start = time.time()
+        inputs_train = get_train_inputs(data[batch_index * batch: (batch_index + 1) * batch],
                                         features,
                                         features_event,
                                         batch)
-        cost = model.f_grad_shared(*inputs_train)
+        model.f_grad_shared(*inputs_train)
         model.f_update_param(params['lr'])
         for fea in model.container['embeddings']:
             if fea == 'realis':
                 continue
             model.container['set_zero'][fea](model.container['zero_vecs'][fea])
         if verbose:
-            print 'Epoch %d Mini-batch %d: cost = %.2f' % (epoch, index, cost)  # time.time() - time_start
+            print 'Batch %d: completed in %.2f seconds' % (index, time.time() - time_start)
 
 
 def predict(model, data, features, features_event, batch):
     num_batch = len(data) / batch
     predictions = []
     for batch_index in range(num_batch):
-        inputs_pred = get_pred_inputs(data, features, features_event, batch)
+        inputs_pred = get_pred_inputs(data[batch_index * batch: (batch_index + 1) * batch],
+                                      features,
+                                      features_event,
+                                      batch)
         cluster_batch = model.predict(*inputs_pred)
         for doc_index in range(cluster_batch.shape[0]):
             doc = data[batch_index * batch + doc_index]
@@ -423,6 +427,12 @@ def predict(model, data, features, features_event, batch):
             coref = defaultdict(list)
             for inst_index in range(len(inst_index_to_id)):
                 coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
+            for inst in doc['missing_inst']:
+                if doc['missing_inst'][inst] is None:
+                    coref[len(coref) + 1] += [inst]
+                else:
+                    cluster_index = cluster_batch[doc_index][doc['missing_inst'][inst]]
+                    coref[cluster_index] += [inst]
             predictions += [coref.values()]
     return predictions
 
@@ -430,7 +440,7 @@ def predict(model, data, features, features_event, batch):
 def write_out(epoch, data_eval, data, predictions, realis_output, path_out):
     with open(path_out + data_eval + '.coref.pred' + str(epoch), 'w') as fout:
         for doc, coref in zip(data, predictions):
-            fout.write('#BeginOfDocument\t' + doc['doc_id'] + '\n')
+            fout.write('#BeginOfDocument ' + doc['doc_id'] + '\n')
             for line in realis_output[doc['doc_id']]:
                 fout.write(line)
             for cluster_index, chain in enumerate(coref):
@@ -439,7 +449,7 @@ def write_out(epoch, data_eval, data, predictions, realis_output, path_out):
                 for inst in chain:
                     chain_str += 'E' + inst.split('-')[1] + ','
                 fout.write(chain_str[:-1] + '\n')
-            fout.write('#EndOfDocument')
+            fout.write('#EndOfDocument\n')
 
 
 def get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp):
@@ -554,25 +564,25 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('pos', -1),
                                         ('chunk', -1),
                                         ('possibleTypes', -1),
-                                        ('dep', -1),
+                                        ('dep', 1),
                                         ('nonref', -1),
                                         ('title', -1),
                                         ('eligible', -1)]),
          expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
          with_word_embs=True,
          update_embs=True,
-         cnn_filter_num=10,
-         cnn_filter_wins=[2],
+         cnn_filter_num=300,
+         cnn_filter_wins=[2, 3, 4, 5],
          dropout=0.,
-         multilayer_nn=[50],
-         dim_cnn=50,
+         multilayer_nn=[600, 300],
+         dim_cnn=300,
          optimizer='adadelta',
          lr=0.01,
          lr_decay=False,
          norm_lim=0.,
          alphas=(0.5, 1.2, 1),
-         batch=3,
-         nepochs=10,
+         batch=20,
+         nepochs=50,
          seed=3435,
          verbose=True):
 
@@ -643,7 +653,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     best_performance = None
     best_epoch = -1
     curr_lr = lr
-    print 'Training ...'
+    print '\nTraining ...\n'
     for epoch in xrange(nepochs):
         train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
 
@@ -661,8 +671,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         if performance['averageCoref'] > best_f1:
             best_f1 = performance['averageCoref']
             print 'NEW BEST: Epoch -', epoch
-            if verbose:
-                print_perf(performance, len('Current Performance') * '-')
+        if verbose:
+            print_perf(performance, 'Current Performance')
 
             best_performance = performance
             best_epoch = epoch

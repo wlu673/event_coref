@@ -64,7 +64,10 @@ def make_data_general(src_dir, corpus_type, window):
 
                 if line.startswith('#BeginOfDocument'):
                     current_doc = line[(line.find(' ') + 1):]
-                    corpora[type_][current_doc] = {'instances': [], 'coreference': [], 'inst_id_to_index': {}}
+                    corpora[type_][current_doc] = {'instances': [],
+                                                   'coreference': [],
+                                                   'missing_inst': [],
+                                                   'inst_id_to_index': {}}
                     continue
 
                 if line == '#EndOfDocument':
@@ -104,13 +107,13 @@ def make_data_general(src_dir, corpus_type, window):
                     continue
 
                 if line.startswith('@Coreference'):
-                    chain = parse_coreference(line, corpora[type_][current_doc]['inst_id_to_index'])
+                    chain, missing_inst = parse_coreference(line, corpora[type_][current_doc]['inst_id_to_index'])
                     if chain == 'Error':
                         print 'Incorrect coreference format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                         exit(0)
-                    elif chain == 'KeyError':
-                        print 'Key error in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
-                    corpora[type_][current_doc]['coreference'] += [chain]
+                    if len(chain) > 0:
+                        corpora[type_][current_doc]['coreference'] += [chain]
+                    corpora[type_][current_doc]['missing_inst'] += [missing_inst]
                     cluster_in_doc += 1
                     continue
 
@@ -267,13 +270,17 @@ def parse_coreference(line, inst_id_to_index):
     if len(entries) != 3:
         return 'Error'
 
-    try:
-        chain = []
-        for event_id in entries[2].split(','):
+    chain = []
+    missing_inst = {}
+    for event_id in entries[2].split(','):
+        if event_id in inst_id_to_index:
             chain += [inst_id_to_index[event_id]]
-        return sorted(chain)
-    except KeyError:
-        return 'KeyError'
+        else:
+            missing_inst[event_id] = None
+    if len(chain) > 0:
+        for event_id in missing_inst:
+            missing_inst[event_id] = chain[0]
+    return sorted(chain), missing_inst
 
 
 def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
@@ -427,6 +434,8 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
 
 ###########################################################################
 # Create Coref Data Sets
+
+
 
 ###########################################################################
 
