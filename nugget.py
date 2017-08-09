@@ -8,9 +8,6 @@ import theano
 from model import *
 
 
-np.set_printoptions(threshold=np.nan)
-
-
 def prepare_word_embeddings(with_word_embs, embeddings):
     if not with_word_embs:
         print 'Using random word embeddings'
@@ -71,16 +68,20 @@ def get_dim_mapping(embeddings, map_fea_to_index, features, features_event):
     return map_dim_emb, map_dim_bin
 
 
-def prepare_data(max_lengths, corpora, map_fea_to_index, features, features_event, map_dim_bin, alphas):
+def prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, features_event, map_dim_bin, alphas):
     data_sets = {}
     for corpus in corpora:
         data_sets[corpus] = []
-        for doc in corpora[corpus]:
-            if len(corpora[corpus][doc]['instances']) == 0:
+        for doc_id in corpora[corpus]:
+            doc = dict()
+            for item in ['instances', 'coreference', 'inst_id_to_index', 'missing_inst']:
+                doc[item] = corpora[corpus][doc_id][prefix + item]
+
+            if len(doc['instances']) == 0:
                 pass
 
             data_doc = defaultdict(list)
-            inst_in_doc = corpora[corpus][doc]['instances']
+            inst_in_doc = doc['instances']
             for inst in inst_in_doc:
                 ret = add_instance(data_doc, inst, map_fea_to_index, features, features_event, map_dim_bin)
                 if not ret == True:
@@ -105,10 +106,10 @@ def prepare_data(max_lengths, corpora, map_fea_to_index, features, features_even
             data_doc['prev_inst'] = np.array(data_doc['prev_inst'], dtype='int32')
             data_doc['mask_prev_inst'] = np.array(data_doc['mask_prev_inst'], dtype='int32')
 
-            process_cluster(data_doc, max_lengths, corpora[corpus][doc]['coreference'], len(inst_in_doc), num_placeholder, alphas)
+            process_cluster(data_doc, max_lengths, doc['coreference'], len(inst_in_doc), num_placeholder, alphas)
 
-            data_doc['doc_id'] = doc
-            data_doc['inst_id_to_index'] = corpora[corpus][doc]['inst_id_to_index']
+            data_doc['doc_id'] = doc_id
+            data_doc['inst_id_to_index'] = doc['inst_id_to_index']
             data_sets[corpus] += [data_doc]
 
     return data_sets
@@ -205,7 +206,7 @@ def add_instance_placeholder(data_doc, features, features_event, map_fea_to_inde
 
 
 def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alphas):
-    map_inst_to_cluster = {}
+    map_inst_to_cluster = dict()
     cluster_offset = 0
     starting_hv = [0] * len(coref) + [-1] * (max_lengths['cluster'] - len(coref))
     inst_init = [0] * num_inst
@@ -299,9 +300,14 @@ def get_features_dim(expected_features, expected_features_event, map_dim_bin, ma
     return features_dim
 
 
-def prepare_realis_output(path_realis, data_eval):
+def prepare_realis_output(path_realis, path_golden, data_eval, pipeline):
     realis_ouput = dict()
-    with open(path_realis + data_eval + '.realis', 'r') as fin:
+    if pipeline:
+        fname = path_realis + data_eval + '.realis'
+    else:
+        fname = path_golden + data_eval
+
+    with open(fname, 'r') as fin:
         current_doc = ''
         body = []
         for line in fin:
@@ -395,21 +401,22 @@ def get_pred_inputs(data, features, features_event, batch):
 
 
 def train(model, data, params, epoch, features, features_event, batch, num_batch, verbose):
+    total_cost = 0
     print (' Training in epoch %d ' % epoch).center(80, '-')
+    time_start = time.time()
     for index, batch_index in enumerate(np.random.permutation(range(num_batch))):
-        time_start = time.time()
         inputs_train = get_train_inputs(data[batch_index * batch: (batch_index + 1) * batch],
                                         features,
                                         features_event,
                                         batch)
-        model.f_grad_shared(*inputs_train)
+        total_cost += model.f_grad_shared(*inputs_train)
         model.f_update_param(params['lr'])
         for fea in model.container['embeddings']:
             if fea == 'realis':
                 continue
             model.container['set_zero'][fea](model.container['zero_vecs'][fea])
-        if verbose:
-            print 'Batch %d: completed in %.2f seconds' % (index, time.time() - time_start)
+    if verbose:
+        print 'Completed in %.2f seconds\nCost = %.2f' % (time.time() - time_start, total_cost)
 
 
 def predict(model, data, features, features_event, batch):
@@ -553,7 +560,7 @@ def print_perf(performance, msg):
 
 def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          path_realis='/scratch/wl1191/event_coref/data/realis/',
-         path_golden='/scratch/wl1191/event_coref/data/eval.tbf',
+         path_golden='/scratch/wl1191/event_coref/data/golden/',
          path_token='/scratch/wl1191/event_coref/data/tkn/',
          path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
          path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
@@ -569,20 +576,21 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('title', -1),
                                         ('eligible', -1)]),
          expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
+         pipeline=True,
          with_word_embs=True,
          update_embs=True,
          cnn_filter_num=300,
          cnn_filter_wins=[2, 3, 4, 5],
-         dropout=0.,
+         dropout=0.5,
          multilayer_nn=[600, 300],
          dim_cnn=300,
          optimizer='adadelta',
          lr=0.01,
          lr_decay=False,
-         norm_lim=0.,
+         norm_lim=9.0,
          alphas=(0.5, 1.2, 1),
-         batch=20,
-         nepochs=50,
+         batch=2,
+         nepochs=400,
          seed=3435,
          verbose=True):
 
@@ -592,7 +600,13 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     prepare_word_embeddings(with_word_embs, embeddings)
     features, features_event = prepare_features(expected_features, expected_features_event)
     map_dim_emb, map_dim_bin = get_dim_mapping(embeddings, map_fea_to_index, features, features_event)
-    data_sets = prepare_data(max_lengths, corpora, map_fea_to_index, features, features_event, map_dim_bin, alphas)
+
+    prefix = 'pipe_' if pipeline else 'gold_'
+    for item in ['instance', 'cluster']:
+        max_lengths[item] = max_lengths[prefix + item]
+        del max_lengths['gold_' + item]
+        del max_lengths['pipe_' + item]
+    data_sets = prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, features_event, map_dim_bin, alphas)
     features_dim = get_features_dim(expected_features, expected_features_event, map_dim_bin, map_dim_emb)
 
     params = {'embeddings': embeddings,
@@ -619,8 +633,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     print 'Number of batches:', num_batch, '\n'
 
     print 'Loading realis outputs ...'
-    realis_outputs = {'valid': prepare_realis_output(path_realis, 'valid'),
-                      'test': prepare_realis_output(path_realis, 'test')}
+    realis_outputs = {'valid': prepare_realis_output(path_realis, path_golden, 'valid', pipeline),
+                      'test': prepare_realis_output(path_realis, path_golden, 'test', pipeline)}
 
     print '\nBuilding model ...\n'
     np.random.seed(seed)
@@ -657,34 +671,34 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     for epoch in xrange(nepochs):
         train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
 
-        print (' Evaluating in epoch %d ' % epoch).center(80, '-')
-        for data_eval in data_sets_eval:
-            data, num_added = data_sets_eval[data_eval]
-            predictions[data_eval] = predict(model, data, features, features_event, batch)
-            if num_added > 0:
-                predictions[data_eval] = predictions[data_eval][:-num_added]
-            write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
+        if (epoch + 1) % 20 == 0:
+            print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+            for data_eval in data_sets_eval:
+                data, num_added = data_sets_eval[data_eval]
+                predictions[data_eval] = predict(model, data, features, features_event, batch)
+                if num_added > 0:
+                    predictions[data_eval] = predictions[data_eval][:-num_added]
+                write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
 
-        path_output = path_out + 'valid.coref.pred' + str(epoch)
-        performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
+            path_output = path_out + 'valid.coref.pred' + str(epoch)
+            performance = get_score(path_golden + 'valid', path_output, path_scorer, path_token, path_conllTemp)
 
-        if performance['averageCoref'] > best_f1:
-            best_f1 = performance['averageCoref']
-            print 'NEW BEST: Epoch -', epoch
-        if verbose:
-            print_perf(performance, 'Current Performance')
+            if performance['averageCoref'] > best_f1:
+                best_f1 = performance['averageCoref']
+                best_performance = performance
+                best_epoch = epoch
+                print 'NEW BEST: Epoch', epoch
+            if verbose:
+                print_perf(performance, 'Current Performance')
 
-            best_performance = performance
-            best_epoch = epoch
-
-        # learning rate decay if no improvement in 10 epochs
-        if lr_decay and abs(best_epoch - epoch) >= 10:
-            curr_lr *= 0.5
-        if curr_lr < 1e-5:
-            break
+            # learning rate decay if no improvement in 10 epochs
+            if lr_decay and abs(best_epoch - epoch) >= 10:
+                curr_lr *= 0.5
+            if curr_lr < 1e-5:
+                break
 
     print '\n', '=' * 80, '\n'
-    print 'BEST RESULT: epoch: ', best_epoch
+    print 'BEST RESULT: Epoch', best_epoch
     print_perf(best_performance, 'Best Performance')
 
 

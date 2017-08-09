@@ -6,29 +6,30 @@ import cPickle
 ###########################################################################
 # Create General Data Sets
 
-def create_general_data_sets(src_dir, w2v_file, corpus_type, window):
+def create_general_data_sets(dir_src, dir_realis, w2v_file, corpus_type, window):
     print "\nLoading raw data..."
-    max_lengths, corpora, map_fea_to_index, vocab = make_data_general(src_dir, corpus_type, window)
+    max_lengths, corpora, map_fea_to_index, vocab = make_data_general(dir_src, dir_realis, corpus_type, window)
     print "Raw data loaded!"
 
-    W_trained, word_index_map, W_random = create_word_embeddings(src_dir, w2v_file, vocab)
+    W_trained, word_index_map, W_random = create_word_embeddings(dir_src, w2v_file, vocab)
     map_fea_to_index['word'] = word_index_map
     embeddings = {'word': W_trained, 'word_random': W_random}
 
     create_feature_embeddings(map_fea_to_index, embeddings, window)
 
     print 'Dumping ...'
-    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index],
-                 open(src_dir + '/' + 'nugget.pkl', 'wb'))
-    # cPickle.dump([max_lengths, corpora], open(src_dir + '/' + 'corpora.pkl', 'wb'))
+    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index], open(dir_src + 'nugget.pkl', 'w'))
+    cPickle.dump(corpora['train'], open(dir_src + 'corpus.pkl', 'w'))
     print 'General datasets created!'
 
 
-def make_data_general(src_dir, corpus_type, window):
+def make_data_general(dir_src, dir_realis, corpus_type, window):
     corpora = {}
     max_lengths = {'sentence': -1,
-                   'instance': -1,
-                   'cluster': -1,
+                   'gold_instance': -1,
+                   'pipe_instance': -1,
+                   'gold_cluster': -1,
+                   'pipe_cluster': -1,
                    'possible_types': -1,
                    'dep': -1}
     vocab = defaultdict(int)
@@ -53,37 +54,65 @@ def make_data_general(src_dir, corpus_type, window):
     current_doc = ''
     current_sent = defaultdict(list)
     sent_id = -1
-    inst_in_doc = 0
-    cluster_in_doc = 0
+    gold_inst_in_doc = 0
+    pipe_inst_in_doc = 0
+    gold_cluster_in_doc = 0
+
     for type_ in corpus_type:
         corpora[type_] = {}
+        realis_output = load_realis_output(dir_src, dir_realis, type_)
         print 'Processing %s data' % type_
-        with open(src_dir + '/raw/' + type_ + '.txt', 'r') as fin:
+        with open(dir_src + 'raw/' + type_ + '.txt', 'r') as fin:
             for line in fin:
                 line = line.strip()
 
                 if line.startswith('#BeginOfDocument'):
                     current_doc = line[(line.find(' ') + 1):]
-                    corpora[type_][current_doc] = {'instances': [],
-                                                   'coreference': [],
-                                                   'missing_inst': [],
-                                                   'inst_id_to_index': {}}
+                    corpora[type_][current_doc] = {'gold_instances': [],
+                                                   'gold_coreference': [],
+                                                   'gold_missing_inst': [],
+                                                   'gold_inst_id_to_index': {},
+                                                   'pipe_instances': [],
+                                                   'pipe_coreference': [],
+                                                   'pipe_missing_inst': [],
+                                                   'pipe_inst_id_to_index': {}}
                     continue
 
                 if line == '#EndOfDocument':
-                    counters['num_of_inst'][type_][inst_in_doc] += 1
-                    if max_lengths['instance'] < inst_in_doc:
-                        max_lengths['instance'] = inst_in_doc
-                    counters['num_of_cluster'][type_][cluster_in_doc] += 1
-                    if max_lengths['cluster'] < cluster_in_doc:
-                        max_lengths['cluster'] = cluster_in_doc
+                    pipe_cluster_in_doc = 0
+                    for coref_line in realis_output[current_doc]['coref']:
+                        chain, missing_inst = parse_coreference(coref_line,
+                                                                corpora[type_][current_doc]['pipe_inst_id_to_index'])
+                        if chain == 'Error':
+                            print 'Incorrect coreference format in realis output for %s:\nDocument: %s\n%s' % (
+                            type_, current_doc, line)
+                            exit(0)
+                        if len(chain) > 0:
+                            corpora[type_][current_doc]['pipe_coreference'] += [chain]
+                        corpora[type_][current_doc]['pipe_missing_inst'] += [missing_inst]
+                        pipe_cluster_in_doc += 1
 
-                    corpora[type_][current_doc]['coreference'] = sorted(corpora[type_][current_doc]['coreference'])
+                    counters['num_of_inst'][type_][gold_inst_in_doc] += 1
+                    if max_lengths['gold_instance'] < gold_inst_in_doc:
+                        max_lengths['gold_instance'] = gold_inst_in_doc
+                    if max_lengths['pipe_instance'] < pipe_inst_in_doc:
+                        max_lengths['pipe_instance'] = pipe_inst_in_doc
+                    counters['num_of_cluster'][type_][gold_cluster_in_doc] += 1
+                    if max_lengths['gold_cluster'] < gold_cluster_in_doc:
+                        max_lengths['gold_cluster'] = gold_cluster_in_doc
+                    if max_lengths['pipe_cluster'] < pipe_cluster_in_doc:
+                        max_lengths['pipe_cluster'] = pipe_cluster_in_doc
+
+                    corpora[type_][current_doc]['gold_coreference'] = sorted(
+                        corpora[type_][current_doc]['gold_coreference'])
+                    corpora[type_][current_doc]['pipe_coreference'] = sorted(
+                        corpora[type_][current_doc]['pipe_coreference'])
 
                     current_doc = ''
                     sent_id = -1
-                    inst_in_doc = 0
-                    cluster_in_doc = 0
+                    gold_inst_in_doc = 0
+                    pipe_inst_in_doc = 0
+                    gold_cluster_in_doc = 0
                     continue
 
                 if not line and not current_doc:
@@ -95,38 +124,80 @@ def make_data_general(src_dir, corpus_type, window):
                     counters['sent_length'][sent_length] += 1
                     if sent_length > max_lengths['sentence']:
                         max_lengths['sentence'] = sent_length
-                    for anchor_index in range(len(current_sent['eventId'])):
-                        event_id = current_sent['eventId'][anchor_index]
-                        if not event_id == 'NONE':
-                            inst = parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id)
-                            corpora[type_][current_doc]['instances'] += [inst]
-                            update_counters(type_, inst, counters, max_lengths)
-                            corpora[type_][current_doc]['inst_id_to_index'][event_id] = inst_in_doc
-                            inst_in_doc += 1
+                    for anchor_index in range(len(current_sent['gold_eventId'])):
+                        gold_event_id = current_sent['gold_eventId'][anchor_index]
+                        if not gold_event_id == 'NONE':
+                            gold_inst = parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id, 'gold')
+                            corpora[type_][current_doc]['gold_instances'] += [gold_inst]
+                            update_counters(type_, gold_inst, counters, max_lengths)
+                            corpora[type_][current_doc]['gold_inst_id_to_index'][gold_event_id] = gold_inst_in_doc
+                            gold_inst_in_doc += 1
+                        pipe_event_id = current_sent['pipe_eventId'][anchor_index]
+                        if not pipe_event_id == 'None':
+                            pipe_inst = parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id, 'pipe')
+                            corpora[type_][current_doc]['pipe_instances'] += [pipe_inst]
+                            corpora[type_][current_doc]['pipe_inst_id_to_index'][pipe_event_id] = pipe_inst_in_doc
+                            pipe_inst_in_doc += 1
                     current_sent = defaultdict(list)
                     continue
 
                 if line.startswith('@Coreference'):
-                    chain, missing_inst = parse_coreference(line, corpora[type_][current_doc]['inst_id_to_index'])
+                    chain, missing_inst = parse_coreference(line, corpora[type_][current_doc]['gold_inst_id_to_index'])
                     if chain == 'Error':
                         print 'Incorrect coreference format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                         exit(0)
                     if len(chain) > 0:
-                        corpora[type_][current_doc]['coreference'] += [chain]
-                    corpora[type_][current_doc]['missing_inst'] += [missing_inst]
-                    cluster_in_doc += 1
+                        corpora[type_][current_doc]['gold_coreference'] += [chain]
+                    corpora[type_][current_doc]['gold_missing_inst'] += [missing_inst]
+                    gold_cluster_in_doc += 1
                     continue
 
-                if not parse_line(line, current_sent, fea_placeholder, map_fea_to_index, vocab):
+                if not parse_line(line,
+                                  realis_output[current_doc]['instances'],
+                                  current_sent,
+                                  fea_placeholder,
+                                  map_fea_to_index,
+                                  vocab):
                     print 'Incorrect line format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                     exit(0)
 
-    write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths)
+    write_stats(dir_src, corpus_type, counters, map_fea_to_index, max_lengths)
 
     return max_lengths, corpora, map_fea_to_index, vocab
 
 
-def parse_line(line, current_sent, fea_placeholder, map_fea_to_index, vocab):
+def load_realis_output(dir_src, dir_realis, type_):
+    realis_output = dict()
+    with open(dir_src + dir_realis + type_ + '.realis', 'r') as fin:
+        current_doc = ''
+        instances = dict()
+        coref = []
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('#BeginOfDocument'):
+                current_doc = line.rstrip('\n').split()[1]
+            elif line.startswith('#EndOfDocument'):
+                realis_output[current_doc] = {'instances': instances, 'coref': coref}
+                instances = dict()
+                coref = []
+            elif line.startswith('@Coreference'):
+                coref += [line]
+            else:
+                entries = line.split('\t')
+                event_id = entries[2].replace('E', 'em-')
+                start_end = entries[3]
+                event_type, event_subtype = entries[5].split('_')
+                realis = entries[6]
+                instances[start_end] = {'eventId': event_id,
+                                        'type': event_type,
+                                        'subtype': event_subtype,
+                                        'realis': realis}
+    return realis_output
+
+
+def parse_line(line, realis_output_doc, current_sent, fea_placeholder, map_fea_to_index, vocab):
     def update_map(msg, feature, feature_map):
         if feature not in feature_map:
             index = len(feature_map)
@@ -200,27 +271,38 @@ def parse_line(line, current_sent, fea_placeholder, map_fea_to_index, vocab):
 
     event_type = entries[17]
     update_map('EVENT TYPE', event_type, map_fea_to_index['type'])
-    current_sent['type'] += [map_fea_to_index['type'][event_type]]
+    current_sent['gold_type'] += [map_fea_to_index['type'][event_type]]
 
     event_subtype = entries[18]
     update_map('EVENT SUBTYPE', event_subtype, map_fea_to_index['subtype'])
-    current_sent['subtype'] += [map_fea_to_index['subtype'][event_subtype]]
+    current_sent['gold_subtype'] += [map_fea_to_index['subtype'][event_subtype]]
 
     event_realis = entries[19]
     if event_realis == 'NONE':
-        current_sent['realis'] += [-1]
+        current_sent['gold_realis'] += [-1]
     else:
         event_realis = event_realis.lower()
         update_map('EVENT REALIS', event_realis, map_fea_to_index['realis'])
-        current_sent['realis'] += [map_fea_to_index['realis'][event_realis]]
+        current_sent['gold_realis'] += [map_fea_to_index['realis'][event_realis]]
 
-    event_event_id = entries[20]
-    current_sent['eventId'] += [event_event_id]
+    event_id = entries[20]
+    current_sent['gold_eventId'] += [event_id]
+
+    key = str(wordStart) + ',' + str(wordEnd)
+    if key in realis_output_doc:
+        inst = realis_output_doc[key]
+        for msg, item in zip(['EVENT TYPE', 'EVENT SUBTYPE', 'EVENT REALIS'], ['type', 'subtype', 'realis']):
+            update_map(msg, inst[item], map_fea_to_index[item])
+            current_sent['pipe_' + item] += [map_fea_to_index[item][inst[item]]]
+        current_sent['pipe_eventId'] += [inst['eventId']]
+    else:
+        for item in ['type', 'subtype', 'realis', 'eventId']:
+            current_sent['pipe_' + item] += ['None']
 
     return True
 
 
-def parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id):
+def parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id, prefix):
     sent_length = len(current_sent['word'])
     inst = {}
 
@@ -239,7 +321,12 @@ def parse_inst(current_sent, fea_placeholder, anchor_index, window, sent_id):
 
     for key in current_sent:
         if key not in fea_placeholder:
-            inst[key] = current_sent[key][anchor_index]
+            if '_' in key:
+                entries = key.split('_')
+                if entries[0] == prefix:
+                    inst[entries[1]] = current_sent[key][anchor_index]
+            else:
+                inst[key] = current_sent[key][anchor_index]
 
     inst['anchor'] = anchor_index_new
     inst['sentenceId'] = sent_id
@@ -273,6 +360,7 @@ def parse_coreference(line, inst_id_to_index):
     chain = []
     missing_inst = {}
     for event_id in entries[2].split(','):
+        event_id = event_id.replace('E', 'em-')
         if event_id in inst_id_to_index:
             chain += [inst_id_to_index[event_id]]
         else:
@@ -283,8 +371,8 @@ def parse_coreference(line, inst_id_to_index):
     return sorted(chain), missing_inst
 
 
-def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
-    with open(src_dir + '/' + 'statistics.txt', 'w') as fout:
+def write_stats(dir_src, corpus_type, counters, map_fea_to_index, max_lengths):
+    with open(dir_src + 'statistics.txt', 'w') as fout:
         header_width = 60
         print >> fout, '\n', 'Stats'.center(header_width, '='), '\n'
         print >> fout, 'Distribution of number of instances in the corpora:'
@@ -293,7 +381,8 @@ def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
             print >> fout, counters['num_of_inst'][type_]
             print >> fout, 'Total: ', sum(counters['num_of_inst'][type_].keys())
         print >> fout, '-' * header_width
-        print >> fout, 'Max number of instances in one doc: ', max_lengths['instance']
+        print >> fout, 'Max number of golden instances in one doc: ', max_lengths['gold_instance']
+        print >> fout, 'Max number of pipeline instances in one doc: ', max_lengths['pipe_instance']
         print >> fout, '\n', '=' * header_width, '\n'
         print >> fout, 'Distribution of number of clusters in the corpora:'
         for type_ in corpus_type:
@@ -301,7 +390,8 @@ def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
             print >> fout, counters['num_of_cluster'][type_]
             print >> fout, 'Total: ', sum(counters['num_of_cluster'][type_].keys())
         print >> fout, '-' * header_width
-        print >> fout, 'Max number of clusters in one doc: ', max_lengths['cluster']
+        print >> fout, 'Max number of golden clusters in one doc: ', max_lengths['gold_cluster']
+        print >> fout, 'Max number of pipelien clusters in one doc: ', max_lengths['pipe_cluster']
         print >> fout, '\n', '=' * header_width, '\n'
         print >> fout, 'Distribution of sentence lengths in the corpora:'
         print >> fout, counters['sent_length']
@@ -324,10 +414,10 @@ def write_stats(src_dir, corpus_type, counters, map_fea_to_index, max_lengths):
             print_feature_stats(fea)
 
 
-def create_word_embeddings(src_dir, w2v_file, vocab):
+def create_word_embeddings(dir_src, w2v_file, vocab):
     print "Vocab size: " + str(len(vocab))
     print "Loading word embeddings..."
-    dim_word_vecs, word_vecs = load_bin_vec(src_dir, w2v_file, vocab)
+    dim_word_vecs, word_vecs = load_bin_vec(dir_src, w2v_file, vocab)
     print "Word embeddings loaded!"
     print "Number of words already in word embeddings: " + str(len(word_vecs))
     add_unknown_words(word_vecs, vocab, 1, dim_word_vecs)
@@ -340,13 +430,13 @@ def create_word_embeddings(src_dir, w2v_file, vocab):
     return W_trained, word_index_map, W_random
 
 
-def load_bin_vec(src_dir, w2v_file, vocab):
+def load_bin_vec(dir_src, w2v_file, vocab):
     """
     Loads 300x1 word vecs from Google (Mikolov) word2vec
     """
     word_vecs = {}
     dim = 0
-    with open(src_dir + '/' + w2v_file, 'rb') as fin:
+    with open(dir_src + w2v_file, 'rb') as fin:
         header = fin.readline()
         vocab_size, layer1_size = map(int, header.split())
         binary_len = np.dtype('float32').itemsize * layer1_size
@@ -435,18 +525,21 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
 ###########################################################################
 # Create Coref Data Sets
 
+def create_coref_data_sets(dir_src, dir_realis):
+    max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(dir_src + 'nugget.pkl', 'rb'))
+
 
 
 ###########################################################################
 
 
-def main(src_dir = '/scratch/wl1191/event_coref/data',
-         w2v_file = 'GoogleNews-vectors-negative300.bin',
-         corpus_type = ["train", "valid", "test"],
-         window = 31):
+def main(dir_src='/scratch/wl1191/event_coref/data/',
+         dir_realis='realis/',
+         w2v_file='GoogleNews-vectors-negative300.bin',
+         corpus_type=['train', 'test', 'valid'],
+         window=31):
     np.random.seed(8989)
-
-    create_general_data_sets(src_dir, w2v_file, corpus_type, window)
+    create_general_data_sets(dir_src, dir_realis, w2v_file, corpus_type, window)
 
 
 if __name__ == '__main__':
