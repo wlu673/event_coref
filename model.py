@@ -1,6 +1,7 @@
 import theano, theano.tensor as T, theano.tensor.shared_randomstreams
 from collections import OrderedDict
 import numpy as np
+import cPickle
 
 
 ###########################################################################
@@ -80,7 +81,8 @@ def non_consecutive_cnn(model):
                                          model.container['fea_dim'],
                                          'non_consecutive_cnn',
                                          model.container['params'],
-                                         model.container['names'])
+                                         model.container['names'],
+                                         model.args['kGivens'])
 
     dim_cnn = model.args['cnn_filter_num'] * len(model.args['cnn_filter_wins'])
 
@@ -111,11 +113,11 @@ def get_concatenation(embeddings, variables, features, dim_num=3, transpose=Fals
     return X
 
 
-def non_consecutive_cnn_driver(inputs, filter_num, filter_wins, batch, length, dim, prefix, params, names):
+def non_consecutive_cnn_driver(inputs, filter_num, filter_wins, batch, length, dim, prefix, params, names, kGivens):
     X = inputs.dimshuffle(1, 0, 2)
     reps = []
     for win in filter_wins:
-        Ws, b = prepare_params(win, filter_num, length, dim, prefix, params, names)
+        Ws, b = prepare_params(win, filter_num, length, dim, prefix, params, names, kGivens)
         rep_one = eval('non_consecutive_cnn_layer' + str(win))(X, filter_num, batch, Ws, b)
         reps += [rep_one]
 
@@ -123,23 +125,27 @@ def non_consecutive_cnn_driver(inputs, filter_num, filter_wins, batch, length, d
     return rep_cnn
 
 
-def prepare_params(window, filter_num, length, dim, prefix, params, names):
+def prepare_params(window, filter_num, length, dim, prefix, params, names, kGivens):
     fan_in = window * dim
     fan_out = filter_num * window * dim / length  # (length - window + 1)
     bound = np.sqrt(6. / (fan_in + fan_out))
 
     Ws = []
     for i in range(window):
-        W = theano.shared(np.random.uniform(low=-bound,
+        name_W = prefix + '_W_win' + str(window) + '_' + str(i)
+        W = create_shared(np.random.uniform(low=-bound,
                                             high=bound,
-                                            size=(dim, filter_num)).astype(theano.config.floatX))
+                                            size=(dim, filter_num)).astype(theano.config.floatX),
+                          kGivens,
+                          name_W)
         Ws += [W]
         params += [W]
-        names += [prefix + '_W_win' + str(window) + '_' + str(i)]
+        names += [name_W]
 
-    b = theano.shared(np.zeros(filter_num, dtype=theano.config.floatX))
+    name_b = prefix + '_b_win_' + str(window)
+    b = create_shared(np.zeros(filter_num, dtype=theano.config.floatX), kGivens, name_b)
     params += [b]
-    names += [prefix + '_b_win_' + str(window)]
+    names += [name_b]
 
     return Ws, b
 
@@ -231,19 +237,21 @@ def non_consecutive_cnn_layer5(inputs, filter_num, batch, Ws, b):
 ###########################################################################
 # Multi-Hidden Layer NN
 
-def multi_hidden_layers(inputs, dim_hids, params, names, prefix):
+def multi_hidden_layers(inputs, dim_hids, params, names, prefix, kGivens):
     hidden_vector = inputs
     index = 0
     for dim_in, dim_out in zip(dim_hids, dim_hids[1:]):
         index += 1
-        hidden_vector = hidden_layer(hidden_vector, dim_in, dim_out, params, names, prefix + '_layer' + str(index),)
+        hidden_vector = hidden_layer(hidden_vector, dim_in, dim_out, params, names, prefix + '_layer' + str(index), kGivens)
     return hidden_vector
 
 
-def hidden_layer(inputs, dim_in, dim_out, params, names, prefix):
+def hidden_layer(inputs, dim_in, dim_out, params, names, prefix, kGivens):
     bound = np.sqrt(6. / (dim_in + dim_out))
-    W = theano.shared(np.random.uniform(low=-bound, high=bound, size=(dim_in, dim_out)).astype(theano.config.floatX))
-    b = theano.shared(np.zeros(dim_out, dtype=theano.config.floatX))
+    W = create_shared(np.random.uniform(low=-bound, high=bound, size=(dim_in, dim_out)).astype(theano.config.floatX),
+                      kGivens,
+                      prefix + '_W')
+    b = create_shared(np.zeros(dim_out, dtype=theano.config.floatX), kGivens, prefix + '_b')
     res = []
     for x in inputs:
         out = T.nnet.sigmoid(T.dot(x, W) + b)
@@ -258,14 +266,18 @@ def hidden_layer(inputs, dim_in, dim_out, params, names, prefix):
 ###########################################################################
 # RNN
 
-def rnn_gru(inputs, dim_in, dim_hidden, mask, prefix, params, names):
-    Uc = theano.shared(np.concatenate([ortho_weight(dim_hidden), ortho_weight(dim_hidden)], axis=1))
-    Wc = theano.shared(np.concatenate([random_matrix(dim_in, dim_hidden), random_matrix(dim_in, dim_hidden)], axis=1))
-    bc = theano.shared(np.zeros(2 * dim_hidden, dtype=theano.config.floatX))
+def rnn_gru(inputs, dim_in, dim_hidden, mask, prefix, params, names, kGivens):
+    Uc = create_shared(np.concatenate([ortho_weight(dim_hidden), ortho_weight(dim_hidden)], axis=1),
+                      kGivens,
+                      prefix + '_Uc')
+    Wc = create_shared(np.concatenate([random_matrix(dim_in, dim_hidden), random_matrix(dim_in, dim_hidden)], axis=1),
+                      kGivens,
+                      prefix + '_Wc')
+    bc = create_shared(np.zeros(2 * dim_hidden, dtype=theano.config.floatX), kGivens, prefix + '_bc')
 
-    Ux = theano.shared(ortho_weight(dim_hidden))
-    Wx = theano.shared(random_matrix(dim_in, dim_hidden))
-    bx = theano.shared(np.zeros(dim_hidden, dtype=theano.config.floatX))
+    Ux = create_shared(ortho_weight(dim_hidden), kGivens, prefix + '_Ux')
+    Wx = create_shared(random_matrix(dim_in, dim_hidden), kGivens, prefix + '_Wx')
+    bx = create_shared(np.zeros(dim_hidden, dtype=theano.config.floatX), kGivens, prefix + '_bx')
 
     gru_params = [Wc, bc, Uc, Wx, Ux, bx]
     params += gru_params
@@ -308,6 +320,17 @@ def ortho_weight(dim):
 
 ###########################################################################
 # Model Utilities
+
+
+def create_shared(random, kGivens, name):
+    if name in kGivens:
+        if kGivens[name].shape == random.shape:
+            print '>>> Using given', name
+            return theano.shared(kGivens[name])
+        else:
+            print '>>> Dimension mismatch with given', name, ': Given:', kGivens[name].shape, ', Actual:', random.shape
+    return theano.shared(random)
+
 
 def trigger_contexts(model):
     wed_window = model.args['wed_window']
@@ -377,6 +400,13 @@ class MainModel(object):
 
         self.predict = self.build_predict(rep_cnn, dim_cnn, local_score, gru_params)
 
+    def save(self, path_out):
+        storer = dict()
+        for param, name in zip(self.container['params'], self.container['names']):
+            storer[name] = param.get_value()
+        cPickle.dump(storer, open(path_out, 'w'))
+
+
     def prepare_features(self, header_width=80):
         self.container['fea_dim'] = 0
         self.container['params'], self.container['names'] = [], []
@@ -386,7 +416,10 @@ class MainModel(object):
         print 'Will update embeddings' if self.args['update_embs'] else 'Will not update embeddings'
         for fea in self.args['features']:
             if self.args['features'][fea] == 0:
-                self.container['embeddings'][fea] = theano.shared(self.args['embeddings'][fea].astype(theano.config.floatX))
+                self.container['embeddings'][fea] = create_shared(
+                    self.args['embeddings'][fea].astype(theano.config.floatX),
+                    self.args['kGivens'],
+                    fea)
 
                 if self.args['update_embs']:
                     self.container['params'] += [self.container['embeddings'][fea]]
@@ -405,8 +438,10 @@ class MainModel(object):
         if len(self.args['features_event']) > 0:
             for fea in self.args['features_event']:
                 if self.args['features_event'][fea] == 0:
-                    self.container['embeddings'][fea] = theano.shared(
-                        self.args['embeddings'][fea].astype(theano.config.floatX))
+                    self.container['embeddings'][fea] = create_shared(
+                        self.args['embeddings'][fea].astype(theano.config.floatX),
+                        self.args['kGivens'],
+                        fea)
 
                     if self.args['update_embs']:
                         self.container['params'] += [self.container['embeddings'][fea]]
@@ -460,13 +495,16 @@ class MainModel(object):
                                       dim_hids,
                                       self.container['params'],
                                       self.container['names'],
-                                      'main_multi_nn')[0]
+                                      'main_multi_nn',
+                                      self.args['kGivens'])[0]
         dim_cnn = dim_hids[-1]
 
         return rep_cnn, dim_cnn
 
     def get_local_score(self, rep_cnn, dim_cnn):
-        v = theano.shared(np.random.uniform(low=-0.2, high=0.2, size=(1, dim_cnn)).astype(theano.config.floatX))
+        v = create_shared(np.random.uniform(low=-0.2, high=0.2, size=(1, dim_cnn)).astype(theano.config.floatX),
+                          self.args['kGivens'],
+                          'v')
         self.container['params'] += [v]
         self.container['names'] += ['v']
         padded = T.concatenate([v, rep_cnn, T.alloc(0., 1, dim_cnn)])
@@ -517,7 +555,8 @@ class MainModel(object):
                                       self.container['mask_rnn'],
                                       'main_rnn',
                                       self.container['params'],
-                                      self.container['names'])
+                                      self.container['names'],
+                                      self.args['kGivens'])
 
         rep_rnn = T.concatenate([rep_rnn, T.alloc(0., 1, dim_cnn)])
         current_hv = rep_rnn[self.container['current_hv']]

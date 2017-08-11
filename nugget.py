@@ -565,6 +565,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
          path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
          path_out='/scratch/wl1191/event_coref/out/',
+         path_kGivens=None,
          window=31,
          wed_window=2,
          expected_features=OrderedDict([('anchor', 0),
@@ -589,8 +590,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          lr_decay=False,
          norm_lim=9.0,
          alphas=(0.5, 1.2, 1),
-         batch=2,
-         nepochs=400,
+         batch=1,
+         nepochs=30,
          seed=3435,
          verbose=True):
 
@@ -609,6 +610,10 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     data_sets = prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, features_event, map_dim_bin, alphas)
     features_dim = get_features_dim(expected_features, expected_features_event, map_dim_bin, map_dim_emb)
 
+    kGivens = dict()
+    if path_kGivens is not None:
+        kGivens = cPickle.load(open(path_kGivens, 'r'))
+
     params = {'embeddings': embeddings,
               'features': features,
               'features_event': features_event,
@@ -626,7 +631,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
               'norm_lim': norm_lim,
               'batch': batch,
               'max_inst_in_doc': max_lengths['instance'],
-              'max_cluster_in_doc': max_lengths['cluster']}
+              'max_cluster_in_doc': max_lengths['cluster'],
+              'kGivens': kGivens}
 
     data_train, _ = fit_data_to_batch(data_sets['train'], batch)
     num_batch = len(data_train) / batch
@@ -640,6 +646,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     np.random.seed(seed)
     random.seed(seed)
     model = MainModel(params)
+    cPickle.dump(params, path_out + 'model_config.pkl')
 
     # print model.train(*inputs_train)
 
@@ -671,7 +678,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     for epoch in xrange(nepochs):
         train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
 
-        if (epoch + 1) % 20 == 0:
+        if epoch >= 10:
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
             for data_eval in data_sets_eval:
                 data, num_added = data_sets_eval[data_eval]
@@ -682,6 +689,9 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
 
             path_output = path_out + 'valid.coref.pred' + str(epoch)
             performance = get_score(path_golden + 'valid', path_output, path_scorer, path_token, path_conllTemp)
+
+            print 'Saving parameters'
+            model.save(path_out + 'params/param_' + str(epoch) + '.pkl')
 
             if performance['averageCoref'] > best_f1:
                 best_f1 = performance['averageCoref']
