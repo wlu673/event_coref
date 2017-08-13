@@ -4,6 +4,7 @@ import cPickle
 import subprocess
 import random
 import time
+import sys
 import theano
 from model import *
 
@@ -300,14 +301,9 @@ def get_features_dim(expected_features, expected_features_event, map_dim_bin, ma
     return features_dim
 
 
-def prepare_realis_output(path_realis, path_golden, data_eval, pipeline):
+def prepare_realis_output(path_realis, data_eval):
     realis_ouput = dict()
-    if pipeline:
-        fname = path_realis + data_eval + '.realis'
-    else:
-        fname = path_golden + data_eval
-
-    with open(fname, 'r') as fin:
+    with open(path_realis + data_eval + '.realis', 'r') as fin:
         current_doc = ''
         body = []
         for line in fin:
@@ -560,8 +556,8 @@ def print_perf(performance, msg):
 
 def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          path_realis='/scratch/wl1191/event_coref/data/realis/',
-         path_golden='/scratch/wl1191/event_coref/data/golden/',
-         path_token='/scratch/wl1191/event_coref/data/tkn/',
+         path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
+         path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
          path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
          path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
          path_out='/scratch/wl1191/event_coref/out/',
@@ -591,7 +587,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          norm_lim=9.0,
          alphas=(0.5, 1.2, 1),
          batch=1,
-         nepochs=30,
+         nepochs=400,
          seed=3435,
          verbose=True):
 
@@ -614,8 +610,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     if path_kGivens is not None:
         kGivens = cPickle.load(open(path_kGivens, 'r'))
 
-    params = {'embeddings': embeddings,
-              'features': features,
+    params = {'features': features,
               'features_event': features_event,
               'features_dim': features_dim,
               'window': window,
@@ -634,40 +629,27 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
               'max_cluster_in_doc': max_lengths['cluster'],
               'kGivens': kGivens}
 
+    print 'Saving model configuration ...'
+    cPickle.dump(params, open(path_out + 'model_config.pkl', 'w'))
+    params['embeddings'] = embeddings
+
     data_train, _ = fit_data_to_batch(data_sets['train'], batch)
     num_batch = len(data_train) / batch
     print 'Number of batches:', num_batch, '\n'
 
     print 'Loading realis outputs ...'
-    realis_outputs = {'valid': prepare_realis_output(path_realis, path_golden, 'valid', pipeline),
-                      'test': prepare_realis_output(path_realis, path_golden, 'test', pipeline)}
+    # realis_outputs = {'valid': prepare_realis_output(path_realis, path_golden, 'valid', pipeline),
+    #                   'test': prepare_realis_output(path_realis, path_golden, 'test', pipeline)}
+    realis_outputs = {'valid': prepare_realis_output(path_realis, 'valid')}
 
     print '\nBuilding model ...\n'
     np.random.seed(seed)
     random.seed(seed)
     model = MainModel(params)
-    cPickle.dump(params, path_out + 'model_config.pkl')
 
-    # print model.train(*inputs_train)
-
-    # print '\nTraining ...\n'
-    # for i in range(600):
-    #     cost = model.f_grad_shared(*inputs_train)
-    #     model.f_update_param(params['lr'])
-    #
-    #     for fea in model.container['embeddings']:
-    #         if fea == 'realis':
-    #             continue
-    #         model.container['set_zero'][fea](model.container['zero_vecs'][fea])
-    #     print '>>> Epoch', i, ': cost = ', cost
-    #
-    #     if cost < 4.:
-    #         break
-    #
-    # print model.test(*inputs_test)
-
-    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
-                                  ('test', fit_data_to_batch(data_sets['test'], batch))])
+    # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
+    #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
+    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
     predictions = OrderedDict()
 
     best_f1 = -np.inf
@@ -678,7 +660,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     for epoch in xrange(nepochs):
         train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
 
-        if epoch >= 10:
+        if (epoch + 1) % 20 == 0:
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
             for data_eval in data_sets_eval:
                 data, num_added = data_sets_eval[data_eval]
@@ -691,7 +673,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
             performance = get_score(path_golden + 'valid', path_output, path_scorer, path_token, path_conllTemp)
 
             print 'Saving parameters'
-            model.save(path_out + 'params/param_' + str(epoch) + '.pkl')
+            model.save(path_out + 'params' + str(epoch) + '.pkl')
 
             if performance['averageCoref'] > best_f1:
                 best_f1 = performance['averageCoref']
@@ -706,6 +688,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                 curr_lr *= 0.5
             if curr_lr < 1e-5:
                 break
+
+        sys.stdout.flush()
 
     print '\n', '=' * 80, '\n'
     print 'BEST RESULT: Epoch', best_epoch
