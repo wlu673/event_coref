@@ -415,7 +415,7 @@ def train(model, data, params, epoch, features, features_event, batch, num_batch
         print 'Completed in %.2f seconds\nCost = %.2f' % (time.time() - time_start, total_cost)
 
 
-def predict(model, data, features, features_event, batch):
+def predict(model, data, features, features_event, batch, model_config):
     num_batch = len(data) / batch
     predictions = []
     for batch_index in range(num_batch):
@@ -425,18 +425,31 @@ def predict(model, data, features, features_event, batch):
                                       batch)
         cluster_batch = model.predict(*inputs_pred)
         for doc_index in range(cluster_batch.shape[0]):
-            doc = data[batch_index * batch + doc_index]
-            inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
-            coref = defaultdict(list)
-            for inst_index in range(len(inst_index_to_id)):
-                coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
-            for inst in doc['missing_inst']:
-                if doc['missing_inst'][inst] is None:
-                    coref[len(coref) + 1] += [inst]
+                doc = data[batch_index * batch + doc_index]
+                inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
+                coref = defaultdict(list)
+                if 'global' in model_config:
+                    for inst_index in range(len(inst_index_to_id)):
+                        coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
                 else:
-                    cluster_index = cluster_batch[doc_index][doc['missing_inst'][inst]]
-                    coref[cluster_index] += [inst]
-            predictions += [coref.values()]
+                    prev_inst_cluster = [0]
+                    curr_num_cluster = 1
+                    for inst_index in range(1, len(inst_index_to_id)):
+                        if cluster_batch[doc_index][inst_index] == inst_index:
+                            curr_cluster = curr_num_cluster
+                            curr_num_cluster += 1
+                        else:
+                            curr_cluster = prev_inst_cluster[cluster_batch[doc_index][inst_index]]
+                        prev_inst_cluster += [curr_cluster]
+                        coref[curr_cluster] += [inst_index_to_id[inst_index]]
+                for inst in doc['missing_inst']:
+                    if doc['missing_inst'][inst] is None:
+                        coref[len(coref) + 1] += [inst]
+                    else:
+                        cluster_index = cluster_batch[doc_index][doc['missing_inst'][inst]]
+                        coref[cluster_index] += [inst]
+                predictions += [coref.values()]
+
     return predictions
 
 
@@ -562,6 +575,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
          path_out='/scratch/wl1191/event_coref/out/',
          path_kGivens=None,
+         model_config='local',
          window=31,
          wed_window=2,
          expected_features=OrderedDict([('anchor', 0),
@@ -627,7 +641,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
               'batch': batch,
               'max_inst_in_doc': max_lengths['instance'],
               'max_cluster_in_doc': max_lengths['cluster'],
-              'kGivens': kGivens}
+              'kGivens': kGivens,
+              'model_config': model_config}
 
     print 'Saving model configuration ...'
     cPickle.dump(params, open(path_out + 'model_config.pkl', 'w'))
@@ -664,13 +679,13 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
             for data_eval in data_sets_eval:
                 data, num_added = data_sets_eval[data_eval]
-                predictions[data_eval] = predict(model, data, features, features_event, batch)
+                predictions[data_eval] = predict(model, data, features, features_event, batch, model_config)
                 if num_added > 0:
                     predictions[data_eval] = predictions[data_eval][:-num_added]
                 write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
 
             path_output = path_out + 'valid.coref.pred' + str(epoch)
-            performance = get_score(path_golden + 'valid', path_output, path_scorer, path_token, path_conllTemp)
+            performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
 
             print 'Saving parameters'
             model.save(path_out + 'params' + str(epoch) + '.pkl')
