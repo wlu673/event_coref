@@ -413,6 +413,7 @@ def train(model, data, params, epoch, features, features_event, batch, num_batch
             model.container['set_zero'][fea](model.container['zero_vecs'][fea])
     if verbose:
         print 'Completed in %.2f seconds\nCost = %.2f' % (time.time() - time_start, total_cost)
+    return total_cost
 
 
 def predict(model, data, features, features_event, batch, model_config):
@@ -433,6 +434,7 @@ def predict(model, data, features, features_event, batch, model_config):
                         coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
                 else:
                     prev_inst_cluster = [0]
+                    coref[0] += [inst_index_to_id[0]]
                     curr_num_cluster = 1
                     for inst_index in range(1, len(inst_index_to_id)):
                         if cluster_batch[doc_index][inst_index] == inst_index:
@@ -574,7 +576,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
          path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
          path_out='/scratch/wl1191/event_coref/out/',
-         path_kGivens=None,
+         path_kGivens='/scratch/wl1191/event_coref/legacy/real/local2/out/params399.pkl',
          model_config='local',
          window=31,
          wed_window=2,
@@ -587,7 +589,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('title', -1),
                                         ('eligible', -1)]),
          expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
-         pipeline=True,
+         pipeline=False,
          with_word_embs=True,
          update_embs=True,
          cnn_filter_num=300,
@@ -598,10 +600,10 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          optimizer='adadelta',
          lr=0.01,
          lr_decay=False,
-         norm_lim=9.0,
+         norm_lim=0,
          alphas=(0.5, 1.2, 1),
          batch=1,
-         nepochs=400,
+         nepochs=20,
          seed=3435,
          verbose=True):
 
@@ -644,9 +646,15 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
               'kGivens': kGivens,
               'model_config': model_config}
 
-    print 'Saving model configuration ...'
-    cPickle.dump(params, open(path_out + 'model_config.pkl', 'w'))
+    params_all = params.copy()
     params['embeddings'] = embeddings
+    params_all.update({'pipeline': pipeline,
+                       'with_word_embs': with_word_embs,
+                       'update_embs': update_embs,
+                       'alphas': alphas})
+
+    print 'Saving model configuration ...'
+    cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
 
     data_train, _ = fit_data_to_batch(data_sets['train'], batch)
     num_batch = len(data_train) / batch
@@ -662,6 +670,35 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     random.seed(seed)
     model = MainModel(params)
 
+    # # inputs_train = get_train_inputs(data_train[2: 3],
+    # #                                 features,
+    # #                                 features_event,
+    # #                                 batch)
+    # # print model.f_detail(*inputs_train)
+    # # local_score, latent_score, alpha, latent_inst = model.f_detail(*inputs_train)
+    # # print '\n', ' Local Score '.center(60, '-'), '\n'
+    # # print local_score
+    # # print '\n', ' Latent Score '.center(60, '-'), '\n'
+    # # print latent_score
+    # # print '\n', ' Alpha '.center(60, '-'), '\n'
+    # # print alpha
+    # # print '\n', ' Latent Inst '.center(60, '-'), '\n'
+    # # print latent_inst
+    #
+    # # for i in range(400):
+    # #     if train(model, data_train, params, i, features, features_event, batch, num_batch, verbose) == 1.:
+    # #         print 'Saving parameters ...'
+    # #         model.save(path_out + 'params' + '.pkl')
+    # #         break
+    #
+    # print '\nTesting ...'
+    # data, num_added = fit_data_to_batch(data_sets['valid'], batch)
+    # predictions = predict(model, data, features, features_event, batch, model_config)
+    # if num_added > 0:
+    #     predictions = predictions[:-num_added]
+    # print 'Writing out ...'
+    # write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
+
     # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
     #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
     data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
@@ -672,10 +709,10 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     best_epoch = -1
     curr_lr = lr
     print '\nTraining ...\n'
-    for epoch in xrange(nepochs):
+    for epoch in xrange(400, 400 + nepochs):
         train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
 
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % 2 == 0:
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
             for data_eval in data_sets_eval:
                 data, num_added = data_sets_eval[data_eval]

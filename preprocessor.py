@@ -522,20 +522,9 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
-###########################################################################
-# Create Coref Data Sets
-
-def create_coref_data_sets(dir_src, dir_realis):
-    max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(dir_src + 'nugget.pkl', 'rb'))
-
-
-
-###########################################################################
-
-
-def main(dir_src='/scratch/wl1191/event_coref/data/',
+def main(dir_src='/scratch/wl1191/event_coref/data/sample/',
          dir_realis='realis/',
-         w2v_file='GoogleNews-vectors-negative300.bin',
+         w2v_file='../GoogleNews-vectors-negative300.bin',
          corpus_type=['train', 'test', 'valid'],
          window=31):
     np.random.seed(8989)

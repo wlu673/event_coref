@@ -382,9 +382,8 @@ class MainModel(object):
         local_score = self.get_local_score(rep_cnn, dim_cnn)
         global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
 
-        # self.train = self.build_train(local_score, global_score)
-
-        self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
+        self.train = self.build_train(local_score, global_score)
+        # self.f_grad_shared, self.f_update_param = self.build_train(local_score, global_score)
 
         self.container['set_zero'] = OrderedDict()
         self.container['zero_vecs'] = OrderedDict()
@@ -469,6 +468,7 @@ class MainModel(object):
         self.container['prev_inst'] = T.imatrix('prev_inst')
         self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
         self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
+        self.container['antecedents'] = T.imatrix('antecedents')
         self.container['alpha'] = T.matrix('alpha')
         self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['lr'] = T.scalar('lr')
@@ -549,7 +549,8 @@ class MainModel(object):
             total_score += global_score
 
         latent_score, alpha, latent_inst = self.get_latent(total_score)
-        cost = T.sum(T.max(alpha * (1 + total_score - latent_score), axis=1))
+        cost_all = T.max(alpha * (1 + total_score - latent_score), axis=1)
+        cost = T.sum(cost_all)
 
         params_all = self.container['params_local']
         names_all = self.container['names_local']
@@ -571,21 +572,24 @@ class MainModel(object):
                    self.container['prev_inst_cluster'],
                    self.container['anchor_position'],
                    self.container['prev_inst_cluster_gold'],
+                   self.container['antecedents'],
                    self.container['alpha']]
 
-        # return theano.function(inputs, outputs=cost, on_unused_input='warn')
+        return theano.function(inputs, outputs=cost, on_unused_input='ignore')
         # return theano.function(inputs, outputs=[latent_inst, alpha], on_unused_input='warn')
         # return theano.function(inputs, gradients, on_unused_input='warn')
 
-        f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
-                                                                     cost,
-                                                                     names_all,
-                                                                     params_all,
-                                                                     gradients,
-                                                                     self.container['lr'],
-                                                                     self.args['norm_lim'])
-
-        return f_grad_shared, f_update_param
+        # f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
+        #                                                              cost,
+        #                                                              names_all,
+        #                                                              params_all,
+        #                                                              gradients,
+        #                                                              self.container['lr'],
+        #                                                              self.args['norm_lim'])
+        #
+        # # f_detail = theano.function(inputs, outputs=cost_all, on_unused_input='ignore')
+        #
+        # return f_grad_shared, f_update_param #, f_detail
 
     def get_latent(self, score):
         padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
