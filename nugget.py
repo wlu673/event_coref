@@ -9,6 +9,9 @@ import theano
 from model import *
 
 
+np.set_printoptions(threshold=np.nan)
+
+
 def prepare_word_embeddings(with_word_embs, embeddings):
     if not with_word_embs:
         print 'Using random word embeddings'
@@ -247,7 +250,9 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
 
     data_doc['prev_inst_cluster_gold'] = np.array([[-1] * max_lengths['instance']] * max_lengths['instance'],
                                                   dtype='int32')
+    data_doc['pairwise_coref'] = np.array([[0] * max_lengths['instance']] * max_lengths['instance'], dtype='int32')
     for inst_curr in range(num_inst):
+        data_doc['mask_pairwise_coref'] += [[1] * inst_curr + [0] * (max_lengths['instance'] - inst_curr)]
         chain = coref[map_inst_to_cluster[inst_curr]]
         if chain[0] == inst_curr:
             data_doc['prev_inst_cluster_gold'][inst_curr][inst_curr] = inst_curr
@@ -256,6 +261,7 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
             if inst_prev >= inst_curr:
                 break
             data_doc['prev_inst_cluster_gold'][inst_curr][inst_prev] = inst_prev
+            data_doc['pairwise_coref'][inst_curr][inst_prev] = 1
 
     data_doc['cluster'] += [-1] * num_placeholder
     data_doc['mask_rnn'] += [0] * num_placeholder
@@ -263,10 +269,11 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
     data_doc['current_hv'] += [[-1] * max_lengths['cluster']] * num_placeholder
     data_doc['mask_current_hv'] += [[0] * max_lengths['cluster']] * num_placeholder
     data_doc['prev_inst_cluster'] += [[-1] * max_lengths['instance']] * (max_lengths['instance'] - num_inst)
+    data_doc['mask_pairwise_coref'] += [[0] * max_lengths['instance']] * (max_lengths['instance'] - num_inst)
 
     data_doc['alpha'] = get_penalty_rates(inst_init, max_lengths, alphas)
 
-    for item in ['cluster', 'mask_cluster', 'current_hv', 'mask_current_hv']:
+    for item in ['cluster', 'mask_cluster', 'current_hv', 'mask_current_hv', 'mask_pairwise_coref']:
         data_doc[item] = np.array(data_doc[item], dtype='int32')
 
 
@@ -332,8 +339,9 @@ def fit_data_to_batch(data, batch):
     return data_fitted, num_to_add
 
 
-def get_batch_inputs(data, features, features_event, batch):
+def get_batch_inputs(data, features, features_event, batch, max_inst_in_doc):
     features_batch, inputs_batch = defaultdict(list), defaultdict(list)
+    placeholder = np.zeros(shape=(max_inst_in_doc, max_inst_in_doc), dtype='int32')
     for i, doc in enumerate(data):
         for fea in features:
             features_batch[fea] += doc[fea]
@@ -345,12 +353,14 @@ def get_batch_inputs(data, features, features_event, batch):
             inputs_batch[item] += doc[item]
         inputs_batch['prev_inst_cluster_gold'] += [doc['prev_inst_cluster_gold']]
         inputs_batch['alpha'] += [doc['alpha']]
+        for item in ['pairwise_coref', 'mask_pairwise_coref']:
+            inputs_batch[item] += [np.concatenate([placeholder] * i + [doc[item]] + [placeholder] * (batch-1-i), axis=1)]
 
     return features_batch, inputs_batch
 
 
-def get_train_inputs(data, features, features_event, batch):
-    features_batch, inputs_batch = get_batch_inputs(data, features, features_event, batch)
+def get_train_inputs(data, features, features_event, batch, max_inst_in_doc, model_config):
+    features_batch, inputs_batch = get_batch_inputs(data, features, features_event, batch, max_inst_in_doc)
 
     inputs = []
     for fea in features:
@@ -363,21 +373,26 @@ def get_train_inputs(data, features, features_event, batch):
             inputs += [np.array(features_batch[fea], dtype='int32')]
         elif features_event[fea] == 1:
             inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
-    inputs += [np.concatenate(inputs_batch['prev_inst'])]
 
-    for item in ['cluster', 'current_hv']:
-        inputs += [np.concatenate(inputs_batch[item])]
-    inputs += [np.array(inputs_batch['mask_rnn'], dtype=theano.config.floatX)]
-    for item in ['prev_inst_cluster', 'anchor_position']:
-        inputs += [np.array(inputs_batch[item], dtype='int32')]
-    inputs += [np.concatenate(inputs_batch['prev_inst_cluster_gold'])]
-    inputs += [np.concatenate(inputs_batch['alpha'])]
+    if 'global' in model_config:
+        inputs += [np.concatenate(inputs_batch['prev_inst'])]
+        for item in ['cluster', 'current_hv']:
+            inputs += [np.concatenate(inputs_batch[item])]
+        inputs += [np.array(inputs_batch['mask_rnn'], dtype=theano.config.floatX)]
+        for item in ['prev_inst_cluster', 'anchor_position']:
+            inputs += [np.array(inputs_batch[item], dtype='int32')]
+        inputs += [np.concatenate(inputs_batch['prev_inst_cluster_gold'])]
+        inputs += [np.concatenate(inputs_batch['alpha'])]
+    else:
+        inputs += [np.array(inputs_batch['anchor_position'], dtype='int32')]
+        for item in ['pairwise_coref', 'mask_pairwise_coref']:
+            inputs += [np.concatenate(inputs_batch[item])]
 
     return inputs
 
 
-def get_pred_inputs(data, features, features_event, batch):
-    features_batch, inputs_batch = get_batch_inputs(data, features, features_event, batch)
+def get_pred_inputs(data, features, features_event, batch, max_inst_in_doc, model_config):
+    features_batch, inputs_batch = get_batch_inputs(data, features, features_event, batch, max_inst_in_doc)
 
     inputs = []
     for fea in features:
@@ -390,13 +405,14 @@ def get_pred_inputs(data, features, features_event, batch):
             inputs += [np.array(features_batch[fea], dtype='int32')]
         elif features_event[fea] == 1:
             inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
-    inputs += [np.concatenate(inputs_batch['prev_inst'])]
+    if 'global' in model_config:
+        inputs += [np.concatenate(inputs_batch['prev_inst'])]
     inputs += [np.array(inputs_batch['anchor_position'], dtype='int32')]
 
     return inputs
 
 
-def train(model, data, params, epoch, features, features_event, batch, num_batch, verbose):
+def train(model, data, params, epoch, features, features_event, batch, num_batch, max_inst_in_doc, model_config, verbose):
     total_cost = 0
     print (' Training in epoch %d ' % epoch).center(80, '-')
     time_start = time.time()
@@ -404,7 +420,9 @@ def train(model, data, params, epoch, features, features_event, batch, num_batch
         inputs_train = get_train_inputs(data[batch_index * batch: (batch_index + 1) * batch],
                                         features,
                                         features_event,
-                                        batch)
+                                        batch,
+                                        max_inst_in_doc,
+                                        model_config)
         total_cost += model.f_grad_shared(*inputs_train)
         model.f_update_param(params['lr'])
         for fea in model.container['embeddings']:
@@ -416,40 +434,79 @@ def train(model, data, params, epoch, features, features_event, batch, num_batch
     return total_cost
 
 
-def predict(model, data, features, features_event, batch, model_config):
+def predict(model, data, features, features_event, batch, max_inst_in_doc, model_config):
+# def predict(preds, data, features, features_event, batch, max_inst_in_doc, model_config):
     num_batch = len(data) / batch
     predictions = []
     for batch_index in range(num_batch):
         inputs_pred = get_pred_inputs(data[batch_index * batch: (batch_index + 1) * batch],
                                       features,
                                       features_event,
-                                      batch)
+                                      batch,
+                                      max_inst_in_doc,
+                                      model_config)
         cluster_batch = model.predict(*inputs_pred)
-        for doc_index in range(cluster_batch.shape[0]):
+        # cluster_batch = preds[batch_index]
+        for doc_index in range(batch):
                 doc = data[batch_index * batch + doc_index]
                 inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
                 coref = defaultdict(list)
                 if 'global' in model_config:
                     for inst_index in range(len(inst_index_to_id)):
                         coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
+                        for inst in doc['missing_inst']:
+                            if doc['missing_inst'][inst] is None:
+                                coref[len(coref) + 1] = [inst]
+                            else:
+                                cluster_index = cluster_batch[doc_index][doc['missing_inst'][inst]]
+                                coref[cluster_index] += [inst]
                 else:
-                    prev_inst_cluster = [0]
-                    coref[0] += [inst_index_to_id[0]]
-                    curr_num_cluster = 1
-                    for inst_index in range(1, len(inst_index_to_id)):
-                        if cluster_batch[doc_index][inst_index] == inst_index:
-                            curr_cluster = curr_num_cluster
-                            curr_num_cluster += 1
+                    offset = doc_index * max_inst_in_doc
+                    map_inst_to_cluster = dict()
+                    clusters_curr = defaultdict(list)
+                    for inst_curr in range(len(inst_index_to_id)):
+                        clusters_ante = []
+                        for inst_ante in range(inst_curr):
+                            if cluster_batch[offset + inst_curr][offset + inst_ante] == 1 and \
+                                            map_inst_to_cluster[inst_ante] not in clusters_ante:
+                                try:
+                                    clusters_ante += [map_inst_to_cluster[inst_ante]]
+                                except KeyError:
+                                    print cluster_batch[offset: offset+max_inst_in_doc][offset: offset+max_inst_in_doc], '\n'
+                                    print map_inst_to_cluster, '\n'
+                                    print clusters_curr, '\n'
+                                    print 'inst_curr =', inst_curr, '\n'
+                                    print 'inst_ante =', inst_ante, '\n'
+                                    exit(0)
+                        if len(clusters_ante) == 0:
+                            map_inst_to_cluster[inst_curr] = len(clusters_curr)
+                            clusters_curr[len(clusters_curr)] += [inst_curr]
+                        elif len(clusters_ante) == 1:
+                            map_inst_to_cluster[inst_curr] = clusters_ante[0]
+                            clusters_curr[clusters_ante[0]] += [inst_curr]
                         else:
-                            curr_cluster = prev_inst_cluster[cluster_batch[doc_index][inst_index]]
-                        prev_inst_cluster += [curr_cluster]
-                        coref[curr_cluster] += [inst_index_to_id[inst_index]]
-                for inst in doc['missing_inst']:
-                    if doc['missing_inst'][inst] is None:
-                        coref[len(coref) + 1] += [inst]
-                    else:
-                        cluster_index = cluster_batch[doc_index][doc['missing_inst'][inst]]
-                        coref[cluster_index] += [inst]
+                            clusters_to_merge = []
+                            clusters_new = defaultdict(list)
+                            for cluster_index, chain in clusters_curr.iteritems():
+                                if cluster_index in clusters_ante:
+                                    clusters_to_merge += chain
+                                else:
+                                    for inst_index in chain:
+                                        map_inst_to_cluster[inst_index] = len(clusters_new)
+                                    clusters_new[len(clusters_new)] = chain
+                            clusters_to_merge += [inst_curr]
+                            for inst_index in clusters_to_merge:
+                                map_inst_to_cluster[inst_index] = len(clusters_new)
+                            clusters_new[len(clusters_new)] = clusters_to_merge
+                            clusters_curr = clusters_new
+                    for cluster_index, chain in clusters_curr.iteritems():
+                        coref[cluster_index] = [inst_index_to_id[inst_index] for inst_index in chain]
+                    for inst in doc['missing_inst']:
+                        if doc['missing_inst'][inst] is None:
+                            coref[len(coref) + 1] = [inst]
+                        else:
+                            cluster_index = map_inst_to_cluster[doc['missing_inst'][inst]]
+                            coref[cluster_index] += [inst]
                 predictions += [coref.values()]
 
     return predictions
@@ -569,14 +626,14 @@ def print_perf(performance, msg):
     print '-' * 80
 
 
-def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
-         path_realis='/scratch/wl1191/event_coref/data/realis/',
+def main(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
+         path_realis='/scratch/wl1191/event_coref/data/sample/realis/',
          path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
          path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
          path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
-         path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
-         path_out='/scratch/wl1191/event_coref/out/',
-         path_kGivens='/scratch/wl1191/event_coref/legacy/real/local2/out/params407.pkl',
+         path_conllTemp='/scratch/wl1191/event_coref/data/sample/coref/conllTempFile_Coreference.txt',
+         path_out='/scratch/wl1191/event_coref/data/sample/out/',
+         path_kGivens='/scratch/wl1191/event_coref/data/sample/out/params0.pkl',
          model_config='local',
          window=31,
          wed_window=2,
@@ -592,11 +649,11 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          pipeline=False,
          with_word_embs=True,
          update_embs=True,
-         cnn_filter_num=300,
-         cnn_filter_wins=[2, 3, 4, 5],
+         cnn_filter_num=10,
+         cnn_filter_wins=[2, 3],
          dropout=0.5,
-         multilayer_nn=[600, 300],
-         dim_cnn=300,
+         multilayer_nn=[20, 10],
+         dim_cnn=10,
          optimizer='adadelta',
          lr=0.01,
          lr_decay=False,
@@ -670,82 +727,81 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     random.seed(seed)
     model = MainModel(params)
 
-    # # inputs_train = get_train_inputs(data_train[2: 3],
-    # #                                 features,
-    # #                                 features_event,
-    # #                                 batch)
-    # # print model.f_detail(*inputs_train)
-    # # local_score, latent_score, alpha, latent_inst = model.f_detail(*inputs_train)
-    # # print '\n', ' Local Score '.center(60, '-'), '\n'
-    # # print local_score
-    # # print '\n', ' Latent Score '.center(60, '-'), '\n'
-    # # print latent_score
-    # # print '\n', ' Alpha '.center(60, '-'), '\n'
-    # # print alpha
-    # # print '\n', ' Latent Inst '.center(60, '-'), '\n'
-    # # print latent_inst
+    # inputs_train = get_train_inputs(data_train[0:3],
+    #                                 features,
+    #                                 features_event,
+    #                                 batch,
+    #                                 max_lengths['instance'],
+    #                                 model_config)
     #
-    # # for i in range(400):
-    # #     if train(model, data_train, params, i, features, features_event, batch, num_batch, verbose) == 1.:
-    # #         print 'Saving parameters ...'
-    # #         model.save(path_out + 'params' + '.pkl')
-    # #         break
-    #
-    # print '\nTesting ...'
-    # data, num_added = fit_data_to_batch(data_sets['valid'], batch)
-    # predictions = predict(model, data, features, features_event, batch, model_config)
-    # if num_added > 0:
-    #     predictions = predictions[:-num_added]
-    # print 'Writing out ...'
-    # write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
+    # print train(model, data_train, params, 0, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
+    # predictions = predict(model, data_train, features, features_event, batch, max_lengths['instance'], model_config)
+    # print predictions
+
+    for i in range(2000):
+        if train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose) == 0.:
+            break
+
+    print 'Saving parameters ...'
+    model.save(path_out + 'params1' + '.pkl')
+
+    print '\nTesting ...'
+    data, num_added = fit_data_to_batch(data_sets['valid'], batch)
+    preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
+    predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+    # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
+    if num_added > 0:
+        predictions = predictions[:-num_added]
+    print 'Writing out ...'
+    write_out(1, 'valid', data, predictions, realis_outputs['valid'], path_out)
 
     # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
     #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
-    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
-    predictions = OrderedDict()
-
-    best_f1 = -np.inf
-    best_performance = None
-    best_epoch = -1
-    curr_lr = lr
-    print '\nTraining ...\n'
-    for epoch in xrange(400, 400 + nepochs):
-        train(model, data_train, params, epoch, features, features_event, batch, num_batch, verbose)
-
-        if (epoch + 1) % 2 == 0:
-            print (' Evaluating in epoch %d ' % epoch).center(80, '-')
-            for data_eval in data_sets_eval:
-                data, num_added = data_sets_eval[data_eval]
-                predictions[data_eval] = predict(model, data, features, features_event, batch, model_config)
-                if num_added > 0:
-                    predictions[data_eval] = predictions[data_eval][:-num_added]
-                write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
-
-            path_output = path_out + 'valid.coref.pred' + str(epoch)
-            performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
-
-            print 'Saving parameters'
-            model.save(path_out + 'params' + str(epoch) + '.pkl')
-
-            if performance['averageCoref'] > best_f1:
-                best_f1 = performance['averageCoref']
-                best_performance = performance
-                best_epoch = epoch
-                print 'NEW BEST: Epoch', epoch
-            if verbose:
-                print_perf(performance, 'Current Performance')
-
-            # learning rate decay if no improvement in 10 epochs
-            if lr_decay and abs(best_epoch - epoch) >= 10:
-                curr_lr *= 0.5
-            if curr_lr < 1e-5:
-                break
-
-        sys.stdout.flush()
-
-    print '\n', '=' * 80, '\n'
-    print 'BEST RESULT: Epoch', best_epoch
-    print_perf(best_performance, 'Best Performance')
+    # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
+    # predictions = OrderedDict()
+    #
+    # best_f1 = -np.inf
+    # best_performance = None
+    # best_epoch = -1
+    # curr_lr = lr
+    # print '\nTraining ...\n'
+    # for epoch in xrange(400, 400 + nepochs):
+    #     train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_inst_in_doc, model_config, verbose)
+    #
+    #     if (epoch + 1) % 2 == 0:
+    #         print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+    #         for data_eval in data_sets_eval:
+    #             data, num_added = data_sets_eval[data_eval]
+    #             predictions[data_eval] = predict(model, data, features, features_event, batch, max_inst_in_doc, model_config)
+    #             if num_added > 0:
+    #                 predictions[data_eval] = predictions[data_eval][:-num_added]
+    #             write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
+    #
+    #         path_output = path_out + 'valid.coref.pred' + str(epoch)
+    #         performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
+    #
+    #         print 'Saving parameters'
+    #         model.save(path_out + 'params' + str(epoch) + '.pkl')
+    #
+    #         if performance['averageCoref'] > best_f1:
+    #             best_f1 = performance['averageCoref']
+    #             best_performance = performance
+    #             best_epoch = epoch
+    #             print 'NEW BEST: Epoch', epoch
+    #         if verbose:
+    #             print_perf(performance, 'Current Performance')
+    #
+    #         # learning rate decay if no improvement in 10 epochs
+    #         if lr_decay and abs(best_epoch - epoch) >= 10:
+    #             curr_lr *= 0.5
+    #         if curr_lr < 1e-5:
+    #             break
+    #
+    #     sys.stdout.flush()
+    #
+    # print '\n', '=' * 80, '\n'
+    # print 'BEST RESULT: Epoch', best_epoch
+    # print_perf(best_performance, 'Best Performance')
 
 
 if __name__ == '__main__':
