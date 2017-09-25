@@ -387,7 +387,7 @@ class MainModel(object):
             self.predict = self.build_predict_combined(rep_cnn, dim_cnn, local_score, gru_params)
         else:
             score = self.get_local_score_nn(rep_cnn, dim_cnn)
-            # self.train = self.build_train_local(score)
+            # self.train = theano.function(inputs, outputs=[score_clipped, score], on_unused_input='ignore')
             self.f_grad_shared, self.f_update_param = self.build_train_local(score)
             self.predict = self.build_predict_local(score)
 
@@ -602,7 +602,15 @@ class MainModel(object):
 
         score = T.dot(rep_cnn, W1) + \
                     T.reshape(T.dot(rep_cnn, W2), [self.args['batch'] * self.args['max_inst_in_doc'], 1]) + b
-        return T.nnet.nnet.sigmoid(score)
+
+        indices_row = np.array([[i] * self.args['max_inst_in_doc']
+                                for i in range(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
+        indices_col = np.concatenate(
+            np.array([[[self.args['max_inst_in_doc'] * b + i
+                        for i in range(self.args['max_inst_in_doc'])]] * self.args['max_inst_in_doc']
+                      for b in range(self.args['batch'])], dtype='int32'))
+        # return score[indices_row, indices_col], score
+        return T.nnet.nnet.sigmoid(score[indices_row, indices_col])
 
     def build_train_local(self, score):
         y = self.container['pairwise_coref']

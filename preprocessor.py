@@ -19,7 +19,7 @@ def create_general_data_sets(dir_src, dir_realis, w2v_file, corpus_type, window)
 
     print 'Dumping ...'
     cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index], open(dir_src + 'nugget.pkl', 'w'))
-    cPickle.dump(corpora['train'], open(dir_src + 'corpus.pkl', 'w'))
+    # cPickle.dump(corpora['train'], open(dir_src + 'corpus.pkl', 'w'))
     print 'General datasets created!'
 
 
@@ -522,9 +522,9 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
-def main(dir_src='/scratch/wl1191/event_coref/data/sample/',
+def main(dir_src='/scratch/wl1191/event_coref/data/',
          dir_realis='realis/',
-         w2v_file='../GoogleNews-vectors-negative300.bin',
+         w2v_file='GoogleNews-vectors-negative300.bin',
          corpus_type=['train', 'test', 'valid'],
          window=31):
     np.random.seed(8989)
