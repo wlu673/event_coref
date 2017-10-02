@@ -6,24 +6,24 @@ import cPickle
 ###########################################################################
 # Create General Data Sets
 
-def create_general_data_sets(dir_src, dir_realis, w2v_file, corpus_type, window):
+def create_general_data_sets(path_src, path_realis, path_w2v_bin, path_w2v_text, emb_type, corpus_type, window):
     print "\nLoading raw data..."
-    max_lengths, corpora, map_fea_to_index, vocab = make_data_general(dir_src, dir_realis, corpus_type, window)
+    max_lengths, corpora, map_fea_to_index, vocab = make_data_general(path_src, path_realis, corpus_type, window)
     print "Raw data loaded!"
 
-    W_trained, word_index_map, W_random = create_word_embeddings(dir_src, w2v_file, vocab)
+    W_trained, word_index_map, W_random = create_word_embeddings(path_src, path_w2v_bin, path_w2v_text, emb_type, vocab)
     map_fea_to_index['word'] = word_index_map
     embeddings = {'word': W_trained, 'word_random': W_random}
 
     create_feature_embeddings(map_fea_to_index, embeddings, window)
 
     print 'Dumping ...'
-    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index], open(dir_src + 'nugget.pkl', 'w'))
-    # cPickle.dump(corpora['train'], open(dir_src + 'corpus.pkl', 'w'))
+    cPickle.dump([max_lengths, corpora, embeddings, map_fea_to_index], open(path_src + 'nugget.pkl', 'w'))
+    cPickle.dump(corpora, open(path_src + 'corpora.pkl', 'w'))
     print 'General datasets created!'
 
 
-def make_data_general(dir_src, dir_realis, corpus_type, window):
+def make_data_general(path_src, path_realis, corpus_type, window):
     corpora = {}
     max_lengths = {'sentence': -1,
                    'gold_instance': -1,
@@ -60,9 +60,9 @@ def make_data_general(dir_src, dir_realis, corpus_type, window):
 
     for type_ in corpus_type:
         corpora[type_] = {}
-        realis_output = load_realis_output(dir_src, dir_realis, type_)
+        realis_output = load_realis_output(path_src, path_realis, type_)
         print 'Processing %s data' % type_
-        with open(dir_src + 'raw/' + type_ + '.txt', 'r') as fin:
+        with open(path_src + 'raw/' + type_ + '.txt', 'r') as fin:
             for line in fin:
                 line = line.strip()
 
@@ -161,14 +161,14 @@ def make_data_general(dir_src, dir_realis, corpus_type, window):
                     print 'Incorrect line format in %s data:\nDocument: %s\n%s' % (type_, current_doc, line)
                     exit(0)
 
-    write_stats(dir_src, corpus_type, counters, map_fea_to_index, max_lengths)
+    write_stats(path_src, corpus_type, counters, map_fea_to_index, max_lengths)
 
     return max_lengths, corpora, map_fea_to_index, vocab
 
 
-def load_realis_output(dir_src, dir_realis, type_):
+def load_realis_output(path_src, path_realis, type_):
     realis_output = dict()
-    with open(dir_src + dir_realis + type_ + '.realis', 'r') as fin:
+    with open(path_src + path_realis + type_ + '.realis', 'r') as fin:
         current_doc = ''
         instances = dict()
         coref = []
@@ -371,8 +371,8 @@ def parse_coreference(line, inst_id_to_index):
     return sorted(chain), missing_inst
 
 
-def write_stats(dir_src, corpus_type, counters, map_fea_to_index, max_lengths):
-    with open(dir_src + 'statistics.txt', 'w') as fout:
+def write_stats(path_src, corpus_type, counters, map_fea_to_index, max_lengths):
+    with open(path_src + 'statistics.txt', 'w') as fout:
         header_width = 60
         print >> fout, '\n', 'Stats'.center(header_width, '='), '\n'
         print >> fout, 'Distribution of number of instances in the corpora:'
@@ -414,10 +414,13 @@ def write_stats(dir_src, corpus_type, counters, map_fea_to_index, max_lengths):
             print_feature_stats(fea)
 
 
-def create_word_embeddings(dir_src, w2v_file, vocab):
+def create_word_embeddings(path_src, path_w2v_bin, path_w2v_text, emb_type, vocab):
     print "Vocab size: " + str(len(vocab))
     print "Loading word embeddings..."
-    dim_word_vecs, word_vecs = load_bin_vec(dir_src, w2v_file, vocab)
+    if emb_type == 'word2vec':
+        dim_word_vecs, word_vecs = load_bin_vec(path_src, path_w2v_bin, vocab)
+    else:
+        dim_word_vecs, word_vecs = load_text_vec(path_src, path_w2v_text, vocab)
     print "Word embeddings loaded!"
     print "Number of words already in word embeddings: " + str(len(word_vecs))
     add_unknown_words(word_vecs, vocab, 1, dim_word_vecs)
@@ -430,13 +433,13 @@ def create_word_embeddings(dir_src, w2v_file, vocab):
     return W_trained, word_index_map, W_random
 
 
-def load_bin_vec(dir_src, w2v_file, vocab):
+def load_bin_vec(path_src, w2v_file, vocab):
     """
     Loads 300x1 word vecs from Google (Mikolov) word2vec
     """
     word_vecs = {}
     dim = 0
-    with open(dir_src + w2v_file, 'rb') as fin:
+    with open(path_src + w2v_file, 'rb') as fin:
         header = fin.readline()
         vocab_size, layer1_size = map(int, header.split())
         binary_len = np.dtype('float32').itemsize * layer1_size
@@ -454,7 +457,34 @@ def load_bin_vec(dir_src, w2v_file, vocab):
                 dim = word_vecs[word].shape[0]
             else:
                 fin.read(binary_len)
-    print 'Dim: ', dim
+    print 'Word embedding dim:', dim
+    return dim, word_vecs
+
+
+def load_text_vec(path_src, w2v_file, vocab):
+    word_vecs = {}
+    count = 0
+    dim = 0
+    with open(path_src + w2v_file, 'r') as fin:
+        for line in fin:
+            count += 1
+            line = line.strip()
+            if count == 1:
+                if len(line.split()) < 10:
+                    dim = int(line.split()[1])
+                    print 'Word embedding dim:', dim
+                    continue
+                else:
+                    dim = len(line.split()) - 1
+                    print 'Word embedding dim:', dim
+            word = line.split()[0]
+            em_str = line[(line.find(' ') + 1):]
+            if word in vocab:
+                word_vecs[word] = np.fromstring(em_str, dtype='float32', sep=' ')
+                if word_vecs[word].shape[0] != dim:
+                    print 'Found a word with mismatched dimension:', dim, word_vecs[word].shape[0]
+                    exit()
+    print 'Word embedding dim:', dim
     return dim, word_vecs
 
 
@@ -522,13 +552,15 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
-def main(dir_src='/scratch/wl1191/event_coref/data/',
-         dir_realis='realis/',
-         w2v_file='GoogleNews-vectors-negative300.bin',
+def main(path_src='/scratch/wl1191/event_coref/data/',
+         path_realis='realis/',
+         path_w2v_bin='GoogleNews-vectors-negative300.bin',
+         path_w2v_text='concatEmbeddings.txt',
+         emb_type='text',
          corpus_type=['train', 'test', 'valid'],
          window=31):
     np.random.seed(8989)
-    create_general_data_sets(dir_src, dir_realis, w2v_file, corpus_type, window)
+    create_general_data_sets(path_src, path_realis, path_w2v_bin, path_w2v_text, emb_type, corpus_type, window)
 
 
 if __name__ == '__main__':

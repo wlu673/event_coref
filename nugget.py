@@ -85,6 +85,7 @@ def prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, featu
                 pass
 
             data_doc = defaultdict(list)
+            data_doc['missing_inst'] = doc['missing_inst']
             inst_in_doc = doc['instances']
             for inst in inst_in_doc:
                 ret = add_instance(data_doc, inst, map_fea_to_index, features, features_event, map_dim_bin)
@@ -308,9 +309,10 @@ def get_features_dim(expected_features, expected_features_event, map_dim_bin, ma
     return features_dim
 
 
-def prepare_realis_output(path_realis, data_eval):
+def prepare_realis_output(path_realis, path_golden, data_eval, pipeline):
+    path_fin = path_realis + data_eval + '.realis' if pipeline else path_realis + '../golden/' + data_eval
     realis_ouput = dict()
-    with open(path_realis + data_eval + '.realis', 'r') as fin:
+    with open(path_fin, 'r') as fin:
         current_doc = ''
         body = []
         for line in fin:
@@ -375,8 +377,9 @@ def get_train_inputs(data, features, features_event, batch, max_inst_in_doc, mod
         elif features_event[fea] == 1:
             inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
 
+    prev_inst = np.concatenate(inputs_batch['prev_inst'])
     if 'global' in model_config:
-        inputs += [np.concatenate(inputs_batch['prev_inst'])]
+        inputs += [prev_inst]
         for item in ['cluster', 'current_hv']:
             inputs += [np.concatenate(inputs_batch[item])]
         inputs += [np.array(inputs_batch['mask_rnn'], dtype=theano.config.floatX)]
@@ -390,6 +393,9 @@ def get_train_inputs(data, features, features_event, batch, max_inst_in_doc, mod
         inputs += [np.array(inputs_batch['anchor_position'], dtype='int32')]
         for item in ['pairwise_coref', 'mask_pairwise_coref']:
             inputs += [np.concatenate(inputs_batch[item])]
+        col_pairwise_coref = prev_inst - 1
+        col_pairwise_coref[col_pairwise_coref == -2] = -1
+        inputs += [col_pairwise_coref]
 
     return inputs
 
@@ -451,66 +457,62 @@ def predict(model, data, features, features_event, batch, max_inst_in_doc, model
         cluster_batch = model.predict(*inputs_pred)
         # cluster_batch = preds[batch_index]
         for doc_index in range(batch):
-                doc = data[batch_index * batch + doc_index]
-                inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
-                coref = defaultdict(list)
-                if 'global' in model_config:
-                    for inst_index in range(len(inst_index_to_id)):
-                        coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
-                        for inst in doc['missing_inst']:
-                            if doc['missing_inst'][inst] is None:
-                                coref[len(coref) + 1] = [inst]
-                            else:
-                                cluster_index = cluster_batch[doc_index][doc['missing_inst'][inst]]
-                                coref[cluster_index] += [inst]
-                else:
-                    offset = doc_index * max_inst_in_doc
-                    map_inst_to_cluster = dict()
-                    clusters_curr = defaultdict(list)
-                    for inst_curr in range(len(inst_index_to_id)):
-                        clusters_ante = []
-                        for inst_ante in range(inst_curr):
-                            if cluster_batch[offset + inst_curr][offset + inst_ante] == 1 and \
-                                            map_inst_to_cluster[inst_ante] not in clusters_ante:
-                                try:
-                                    clusters_ante += [map_inst_to_cluster[inst_ante]]
-                                except KeyError:
-                                    print cluster_batch[offset: offset+max_inst_in_doc][offset: offset+max_inst_in_doc], '\n'
-                                    print map_inst_to_cluster, '\n'
-                                    print clusters_curr, '\n'
-                                    print 'inst_curr =', inst_curr, '\n'
-                                    print 'inst_ante =', inst_ante, '\n'
-                                    exit(0)
-                        if len(clusters_ante) == 0:
-                            map_inst_to_cluster[inst_curr] = len(clusters_curr)
-                            clusters_curr[len(clusters_curr)] += [inst_curr]
-                        elif len(clusters_ante) == 1:
-                            map_inst_to_cluster[inst_curr] = clusters_ante[0]
-                            clusters_curr[clusters_ante[0]] += [inst_curr]
+            doc = data[batch_index * batch + doc_index]
+            inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
+            coref = defaultdict(list)
+            if 'global' in model_config:
+                for inst_index in range(len(inst_index_to_id)):
+                    coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
+                for chain in doc['missing_inst']:
+                    cluster_new = len(coref) + 1
+                    for inst in chain:
+                        if chain[inst] is None:
+                            coref[cluster_new] += [inst]
                         else:
-                            clusters_to_merge = []
-                            clusters_new = defaultdict(list)
-                            for cluster_index, chain in clusters_curr.iteritems():
-                                if cluster_index in clusters_ante:
-                                    clusters_to_merge += chain
-                                else:
-                                    for inst_index in chain:
-                                        map_inst_to_cluster[inst_index] = len(clusters_new)
-                                    clusters_new[len(clusters_new)] = chain
-                            clusters_to_merge += [inst_curr]
-                            for inst_index in clusters_to_merge:
-                                map_inst_to_cluster[inst_index] = len(clusters_new)
-                            clusters_new[len(clusters_new)] = clusters_to_merge
-                            clusters_curr = clusters_new
-                    for cluster_index, chain in clusters_curr.iteritems():
-                        coref[cluster_index] = [inst_index_to_id[inst_index] for inst_index in chain]
-                    for inst in doc['missing_inst']:
-                        if doc['missing_inst'][inst] is None:
-                            coref[len(coref) + 1] = [inst]
-                        else:
-                            cluster_index = map_inst_to_cluster[doc['missing_inst'][inst]]
+                            cluster_index = cluster_batch[doc_index][chain[inst]]
                             coref[cluster_index] += [inst]
-                predictions += [coref.values()]
+            else:
+                offset = doc_index * max_inst_in_doc
+                map_inst_to_cluster = dict()
+                clusters_curr = defaultdict(list)
+                for inst_curr in range(len(inst_index_to_id)):
+                    clusters_ante = []
+                    for inst_ante in range(inst_curr):
+                        if cluster_batch[offset + inst_curr][inst_ante] == 1 and \
+                                        map_inst_to_cluster[inst_ante] not in clusters_ante:
+                                clusters_ante += [map_inst_to_cluster[inst_ante]]
+                    if len(clusters_ante) == 0:
+                        map_inst_to_cluster[inst_curr] = len(clusters_curr)
+                        clusters_curr[len(clusters_curr)] += [inst_curr]
+                    elif len(clusters_ante) == 1:
+                        map_inst_to_cluster[inst_curr] = clusters_ante[0]
+                        clusters_curr[clusters_ante[0]] += [inst_curr]
+                    else:
+                        clusters_to_merge = []
+                        clusters_new = defaultdict(list)
+                        for cluster_index, chain in clusters_curr.iteritems():
+                            if cluster_index in clusters_ante:
+                                clusters_to_merge += chain
+                            else:
+                                for inst_index in chain:
+                                    map_inst_to_cluster[inst_index] = len(clusters_new)
+                                clusters_new[len(clusters_new)] = chain
+                        clusters_to_merge += [inst_curr]
+                        for inst_index in clusters_to_merge:
+                            map_inst_to_cluster[inst_index] = len(clusters_new)
+                        clusters_new[len(clusters_new)] = clusters_to_merge
+                        clusters_curr = clusters_new
+                for cluster_index, chain in clusters_curr.iteritems():
+                    coref[cluster_index] = [inst_index_to_id[inst_index] for inst_index in chain]
+                for chain in doc['missing_inst']:
+                    cluster_new = len(coref) + 1
+                    for inst in chain:
+                        if chain[inst] is None:
+                            coref[cluster_new] += [inst]
+                        else:
+                            cluster_index = map_inst_to_cluster[chain[inst]]
+                            coref[cluster_index] += [inst]
+            predictions += [coref.values()]
 
     return predictions
 
@@ -635,7 +637,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
          path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
          path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
          path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
-         path_out='/scratch/wl1191/event_coref/out',
+         path_out='/scratch/wl1191/event_coref/out/',
          path_kGivens=None,
          model_config='local',
          window=31,
@@ -648,7 +650,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                                         ('nonref', -1),
                                         ('title', -1),
                                         ('eligible', -1)]),
-         expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
+         expected_features_event=OrderedDict([('type', 1), ('subtype', 1), ('realis', -1)]),
          pipeline=False,
          with_word_embs=True,
          update_embs=True,
@@ -682,8 +684,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     data_sets = prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, features_event, map_dim_bin, alphas)
 
     # print corpora['train'][data_sets['train'][0]['doc_id']]['gold_coreference'], '\n'
-    # print data_sets['train'][0]['pairwise_coref'], '\n'
-    # print data_sets['train'][0]['mask_pairwise_coref'], '\n'
+    # print len(data_sets['train'][0]['inst_id_to_index']), '\n'
+    # print data_sets['train'][0]['col_pairwise_coref'], '\n'
 
     features_dim = get_features_dim(expected_features, expected_features_event, map_dim_bin, map_dim_emb)
 
@@ -728,7 +730,7 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     print 'Loading realis outputs ...'
     # realis_outputs = {'valid': prepare_realis_output(path_realis, path_golden, 'valid', pipeline),
     #                   'test': prepare_realis_output(path_realis, path_golden, 'test', pipeline)}
-    realis_outputs = {'valid': prepare_realis_output(path_realis, 'valid')}
+    realis_outputs = {'valid': prepare_realis_output(path_realis, path_golden, 'valid', pipeline)}
 
     print '\nBuilding model ...\n'
     np.random.seed(seed)
@@ -767,7 +769,6 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
     data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
     predictions = OrderedDict()
-
     best_f1 = -np.inf
     best_performance = None
     best_epoch = -1
