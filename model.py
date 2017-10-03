@@ -613,7 +613,9 @@ class MainModel(object):
                             for i in range(self.args['max_inst_in_doc'])]] * self.args['max_inst_in_doc']
                           for b in range(self.args['batch'])], dtype='int32'))
             return T.nnet.nnet.sigmoid(score[indices_row, indices_col])
-        return T.stack((_step('0'), _step('1')), axis=2)
+        score = T.stack((_step('0'), _step('1')), axis=2)
+        score = T.exp(score - T.max(score, axis=2, keepdims=True))
+        return score / T.sum(score, axis=2, keepdims=True)
 
     def build_train_local(self, score):
         row_dim = self.args['max_inst_in_doc'] * self.args['batch']

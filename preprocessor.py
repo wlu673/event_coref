@@ -11,7 +11,7 @@ def create_general_data_sets(path_src, path_realis, path_w2v_bin, path_w2v_text,
     max_lengths, corpora, map_fea_to_index, vocab = make_data_general(path_src, path_realis, corpus_type, window)
     print "Raw data loaded!"
 
-    W_trained, word_index_map, W_random = create_word_embeddings(path_src, path_w2v_bin, path_w2v_text, emb_type, vocab)
+    W_trained, word_index_map, W_random = create_word_embeddings(path_w2v_bin, path_w2v_text, emb_type, vocab)
     map_fea_to_index['word'] = word_index_map
     embeddings = {'word': W_trained, 'word_random': W_random}
 
@@ -414,13 +414,13 @@ def write_stats(path_src, corpus_type, counters, map_fea_to_index, max_lengths):
             print_feature_stats(fea)
 
 
-def create_word_embeddings(path_src, path_w2v_bin, path_w2v_text, emb_type, vocab):
+def create_word_embeddings(path_w2v_bin, path_w2v_text, emb_type, vocab):
     print "Vocab size: " + str(len(vocab))
     print "Loading word embeddings..."
     if emb_type == 'word2vec':
-        dim_word_vecs, word_vecs = load_bin_vec(path_src, path_w2v_bin, vocab)
+        dim_word_vecs, word_vecs = load_bin_vec(path_w2v_bin, vocab)
     else:
-        dim_word_vecs, word_vecs = load_text_vec(path_src, path_w2v_text, vocab)
+        dim_word_vecs, word_vecs = load_text_vec(path_w2v_text, vocab)
     print "Word embeddings loaded!"
     print "Number of words already in word embeddings: " + str(len(word_vecs))
     add_unknown_words(word_vecs, vocab, 1, dim_word_vecs)
@@ -433,13 +433,13 @@ def create_word_embeddings(path_src, path_w2v_bin, path_w2v_text, emb_type, voca
     return W_trained, word_index_map, W_random
 
 
-def load_bin_vec(path_src, w2v_file, vocab):
+def load_bin_vec(w2v_file, vocab):
     """
     Loads 300x1 word vecs from Google (Mikolov) word2vec
     """
     word_vecs = {}
     dim = 0
-    with open(path_src + w2v_file, 'rb') as fin:
+    with open(w2v_file, 'rb') as fin:
         header = fin.readline()
         vocab_size, layer1_size = map(int, header.split())
         binary_len = np.dtype('float32').itemsize * layer1_size
@@ -461,11 +461,11 @@ def load_bin_vec(path_src, w2v_file, vocab):
     return dim, word_vecs
 
 
-def load_text_vec(path_src, w2v_file, vocab):
+def load_text_vec(w2v_file, vocab):
     word_vecs = {}
     count = 0
     dim = 0
-    with open(path_src + w2v_file, 'r') as fin:
+    with open(w2v_file, 'r') as fin:
         for line in fin:
             count += 1
             line = line.strip()
@@ -552,10 +552,10 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
-def main(path_src='/scratch/wl1191/event_coref/data/',
+def main(path_src='/scratch/wl1191/event_coref/data/sample/',
          path_realis='realis/',
-         path_w2v_bin='GoogleNews-vectors-negative300.bin',
-         path_w2v_text='concatEmbeddings.txt',
+         path_w2v_bin='/scratch/wl1191/event_coref/data/GoogleNews-vectors-negative300.bin',
+         path_w2v_text='/scratch/wl1191/event_coref/data/concatEmbeddings.txt',
          emb_type='text',
          corpus_type=['train', 'test', 'valid'],
          window=31):
