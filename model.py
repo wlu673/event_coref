@@ -599,12 +599,13 @@ class MainModel(object):
             W2 = create_shared(np.random.uniform(low=-0.2, high=0.2, size=dim_cnn).astype(theano.config.floatX),
                                self.args['kGivens'],
                                'ffnn_W1_' + suffix)
-            b = create_shared(0., self.args['kGivens'], 'ffnn_b_' + suffix)
-            self.container['params_local'] += [W1, W2, b]
-            self.container['names_local'] += [item + suffix for item in ['ffnn_W0_', 'ffnn_W1_', 'ffnn_b_']]
+            b1 = create_shared(0., self.args['kGivens'], 'ffnn_b0_' + suffix)
+            b2 = create_shared(0., self.args['kGivens'], 'ffnn_b1_' + suffix)
+            self.container['params_local'] += [W1, W2, b1, b2]
+            self.container['names_local'] += [item + suffix for item in ['ffnn_W0_', 'ffnn_W1_', 'ffnn_b1_', 'ffnn_b2_']]
 
-            score = T.dot(rep_cnn, W1) + \
-                        T.reshape(T.dot(rep_cnn, W2), [self.args['batch'] * self.args['max_inst_in_doc'], 1]) + b
+            score = T.tanh(T.dot(rep_cnn, W1) + b1) + \
+                        T.reshape(T.tanh(T.dot(rep_cnn, W2) + b2), [self.args['batch'] * self.args['max_inst_in_doc'], 1])
 
             indices_row = np.array([[i] * self.args['max_inst_in_doc']
                                     for i in range(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
@@ -612,7 +613,8 @@ class MainModel(object):
                 np.array([[[self.args['max_inst_in_doc'] * b + i
                             for i in range(self.args['max_inst_in_doc'])]] * self.args['max_inst_in_doc']
                           for b in range(self.args['batch'])], dtype='int32'))
-            return T.nnet.nnet.sigmoid(score[indices_row, indices_col])
+            # return T.nnet.nnet.sigmoid(score[indices_row, indices_col])
+            return score[indices_row, indices_col]
         score = T.stack((_step('0'), _step('1')), axis=2)
         score = T.exp(score - T.max(score, axis=2, keepdims=True))
         return score / T.sum(score, axis=2, keepdims=True)

@@ -631,43 +631,43 @@ def print_perf(performance, msg):
     print '-' * 80
 
 
-def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
-         path_realis='/scratch/wl1191/event_coref/data/realis/',
-         path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
-         path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
-         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
-         path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
-         path_out='/scratch/wl1191/event_coref/out/',
-         path_kGivens=None,
-         model_config='local',
-         window=31,
-         wed_window=2,
-         expected_features=OrderedDict([('anchor', 0),
-                                        ('pos', -1),
-                                        ('chunk', -1),
-                                        ('possibleTypes', -1),
-                                        ('dep', 1),
-                                        ('nonref', -1),
-                                        ('title', -1),
-                                        ('eligible', -1)]),
-         expected_features_event=OrderedDict([('type', 1), ('subtype', 1), ('realis', -1)]),
-         pipeline=False,
-         with_word_embs=True,
-         update_embs=True,
-         cnn_filter_num=300,
-         cnn_filter_wins=[2, 3, 4, 5],
-         dropout=0.5,
-         multilayer_nn=[600, 300],
-         dim_cnn=300,
-         optimizer='sgd',
-         lr=0.05,
-         lr_decay=True,
-         norm_lim=0,
-         alphas=(0.5, 1.2, 1),
-         batch=1,
-         nepochs=100,
-         seed=3435,
-         verbose=True):
+def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
+        path_realis='/scratch/wl1191/event_coref/data/sample/realis/',
+        path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
+        path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
+        path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
+        path_conllTemp='/scratch/wl1191/event_coref/data/sample/coref/conllTempFile_Coreference.txt',
+        path_out='/scratch/wl1191/event_coref/data/sample/out/',
+        path_kGivens=None,
+        model_config='local',
+        window=31,
+        wed_window=2,
+        expected_features=OrderedDict([('anchor', 0),
+                                       ('pos', -1),
+                                       ('chunk', -1),
+                                       ('possibleTypes', -1),
+                                       ('dep', 1),
+                                       ('nonref', -1),
+                                       ('title', -1),
+                                       ('eligible', -1)]),
+        expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
+        pipeline=False,
+        with_word_embs=True,
+        update_embs=True,
+        cnn_filter_num=40, # 300,
+        cnn_filter_wins=[2, 3, 4, 5], # [2, 3, 4, 5],
+        dropout=0.5,
+        multilayer_nn=[160, 80, 40], # [600, 300],
+        dim_cnn=40, # 300,
+        optimizer='adadelta',
+        lr=0.05,
+        lr_decay=False,
+        norm_lim=0,
+        alphas=(0.5, 1.2, 1),
+        batch=3,
+        nepochs=100,
+        seed=3435,
+        verbose=True):
 
     print '\nLoading dataset:', path_dataset, '...\n'
     max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(path_dataset, 'rb'))
@@ -720,8 +720,8 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                        'update_embs': update_embs,
                        'alphas': alphas})
 
-    print 'Saving model configuration ...'
-    cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
+    # print 'Saving model configuration ...'
+    # cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
 
     data_train, _ = fit_data_to_batch(data_sets['train'], batch)
     num_batch = len(data_train) / batch
@@ -748,70 +748,70 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     # predictions = predict(model, data_train, features, features_event, batch, max_lengths['instance'], model_config)
     # print predictions
 
-    # for i in range(1000):
-    #     if train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose) == 0.:
-    #         break
-    #
-    # print 'Saving parameters ...'
-    # model.save(path_out + 'params_no_dropout' + '.pkl')
-    #
-    # print '\nTesting ...'
-    # data, num_added = fit_data_to_batch(data_sets['valid'], batch)
-    # # preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
-    # predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
-    # # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
-    # if num_added > 0:
-    #     predictions = predictions[:-num_added]
-    # print 'Writing out ...'
-    # write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
+    for i in range(1000):
+        if train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose) == 0.:
+            break
+
+    print 'Saving parameters ...'
+    model.save(path_out + 'params_no_dropout' + '.pkl')
+
+    print '\nTesting ...'
+    data, num_added = fit_data_to_batch(data_sets['valid'], batch)
+    # preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
+    predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+    # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
+    if num_added > 0:
+        predictions = predictions[:-num_added]
+    print 'Writing out ...'
+    write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
 
     # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
     #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
-    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
-    predictions = OrderedDict()
-    best_f1 = -np.inf
-    best_performance = None
-    best_epoch = -1
-    curr_lr = lr
-    print '\nTraining ...\n'
-    for epoch in xrange(nepochs):
-        train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
-
-        if (epoch + 1) % 10 == 0:
-            print (' Evaluating in epoch %d ' % epoch).center(80, '-')
-            for data_eval in data_sets_eval:
-                data, num_added = data_sets_eval[data_eval]
-                predictions[data_eval] = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
-                if num_added > 0:
-                    predictions[data_eval] = predictions[data_eval][:-num_added]
-                write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
-
-            path_output = path_out + 'valid.coref.pred' + str(epoch)
-            performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
-
-            print 'Saving parameters'
-            model.save(path_out + 'params' + str(epoch) + '.pkl')
-
-            if performance['averageCoref'] > best_f1:
-                best_f1 = performance['averageCoref']
-                best_performance = performance
-                best_epoch = epoch
-                print 'NEW BEST: Epoch', epoch
-            if verbose:
-                print_perf(performance, 'Current Performance')
-
-            # learning rate decay if no improvement in 10 epochs
-            if lr_decay and abs(best_epoch - epoch) >= 10:
-                curr_lr *= 0.5
-            if curr_lr < 1e-5:
-                break
-
-        sys.stdout.flush()
-
-    print '\n', '=' * 80, '\n'
-    print 'BEST RESULT: Epoch', best_epoch
-    print_perf(best_performance, 'Best Performance')
+    # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
+    # predictions = OrderedDict()
+    # best_f1 = -np.inf
+    # best_performance = None
+    # best_epoch = -1
+    # curr_lr = lr
+    # print '\nTraining ...\n'
+    # for epoch in xrange(nepochs):
+    #     train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
+    #
+    #     if (epoch + 1) % 10 == 0:
+    #         print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+    #         for data_eval in data_sets_eval:
+    #             data, num_added = data_sets_eval[data_eval]
+    #             predictions[data_eval] = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+    #             if num_added > 0:
+    #                 predictions[data_eval] = predictions[data_eval][:-num_added]
+    #             write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
+    #
+    #         path_output = path_out + 'valid.coref.pred' + str(epoch)
+    #         performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
+    #
+    #         print 'Saving parameters'
+    #         model.save(path_out + 'params' + str(epoch) + '.pkl')
+    #
+    #         if performance['averageCoref'] > best_f1:
+    #             best_f1 = performance['averageCoref']
+    #             best_performance = performance
+    #             best_epoch = epoch
+    #             print 'NEW BEST: Epoch', epoch
+    #         if verbose:
+    #             print_perf(performance, 'Current Performance')
+    #
+    #         # learning rate decay if no improvement in 10 epochs
+    #         if lr_decay and abs(best_epoch - epoch) >= 10:
+    #             curr_lr *= 0.5
+    #         if curr_lr < 1e-5:
+    #             break
+    #
+    #     sys.stdout.flush()
+    #
+    # print '\n', '=' * 80, '\n'
+    # print 'BEST RESULT: Epoch', best_epoch
+    # print_perf(best_performance, 'Best Performance')
 
 
 if __name__ == '__main__':
-    main()
+    run()
