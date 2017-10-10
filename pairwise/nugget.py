@@ -312,7 +312,7 @@ def get_coref_chain(data, predictions):
         for cluster in data['doc_info'][doc_id]['missing_inst']:
             cluster_index = len(coref_chain_str[doc_id])
             for missing_inst in cluster:
-                if cluster[missing_inst] is not None:
+                if cluster[missing_inst] is None:
                     coref_chain_str[doc_id][cluster_index] += [missing_inst]
                 else:
                     cluster_index = map_inst_to_cluster[cluster[missing_inst]]
@@ -443,7 +443,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
         path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
         path_out='/scratch/wl1191/event_coref/out/',
-        path_kGivens=None,  # '/scratch/wl1191/event_coref/data/sample/out/params.pkl',
+        path_kGivens='/scratch/wl1191/event_coref/out/params17.pkl',
         window=31,
         wed_window=2,
         expected_features=OrderedDict([('anchor', 0),
@@ -465,8 +465,8 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         lr=0.05,
         lr_decay=False,
         norm_lim=0,
-        batch=50,
-        nepochs=2,
+        batch=200,
+        nepochs=12,
         seed=3435,
         verbose=True):
     print '\nLoading dataset:', path_dataset, '...\n'
@@ -503,8 +503,8 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                        'with_word_embs': with_word_embs,
                        'update_embs': update_embs})
 
-    print 'Saving model configuration ...'
-    cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
+    # print 'Saving model configuration ...'
+    # cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
 
     data_train, _ = fit_data_to_batch(data_sets['train']['inst_pairs'], batch)
     num_batch = len(data_train['word1']) / batch
@@ -529,6 +529,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     #
     # print '\nTesting ...'
     # data_valid, num_added = fit_data_to_batch(data_sets['valid']['inst_pairs'], batch)
+    # print 'Number of batches to eval:', len(data_valid['word1']) / batch
     # predictions = predict(model, data_valid, features, batch)
     # if num_added > 0:
     #     predictions = predictions[:-num_added]
@@ -541,13 +542,15 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
     #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
     data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid']['inst_pairs'], batch))])
+    print '\nNumber of batches to eval:', len(data_sets_eval['valid'][0]['word1']) / batch
     predictions = OrderedDict()
     best_f1 = -np.inf
     best_performance = None
     best_epoch = -1
     curr_lr = lr
     print '\nTraining ...\n'
-    for epoch in xrange(nepochs):
+    sys.stdout.flush()
+    for epoch in xrange(18 + nepochs):
         train(model, data_train, params, epoch, features, batch, num_batch, verbose)
 
         if (epoch + 1) % 1 == 0:
@@ -557,7 +560,8 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                 predictions[data_eval] = predict(model, data, features, batch)
                 if num_added > 0:
                     predictions[data_eval] = predictions[data_eval][:-num_added]
-                coref_chain = get_coref_chain(data_sets[data_eval], predictions)
+                cPickle.dump(predictions[data_eval], open(path_out + 'predictions' + str(epoch) + '.pkl', 'w'))
+                coref_chain = get_coref_chain(data_sets[data_eval], predictions[data_eval])
                 write_out(epoch, 'valid', coref_chain, realis_outputs['valid'], path_out)
 
             path_output = path_out + 'valid.coref.pred' + str(epoch)
