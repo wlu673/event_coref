@@ -476,9 +476,8 @@ class MainModel(object):
         self.container['antecedents'] = T.imatrix('antecedents')
         self.container['alpha'] = T.matrix('alpha')
         self.container['anchor_position'] = T.ivector('anchor_position')
-        self.container['pairwise_coref'] = T.imatrix('pairwise_coref')
-        self.container['mask_pairwise_coref'] = T.imatrix('mask_pairwise_coref')
-        self.container['col_pairwise_coref'] = T.imatrix('col_pairwise_coref')
+        self.container['pairwise_fea'] = T.tensor3('pairwise_fea')
+        self.container['y'] = T.imatrix('y')
         self.container['lr'] = T.scalar('lr')
         self.container['zero_vector'] = T.vector('zero_vector')
 
@@ -515,7 +514,7 @@ class MainModel(object):
         return rep_cnn, dim_cnn
 
     def get_local_score_dot(self, rep_cnn, dim_cnn):
-        v = create_shared(np.random.uniform(low=-0.2, high=0.2, size=(1, dim_cnn)).astype(theano.config.floatX),
+        v = create_shared(np.random.uniform(low=-1., high=1., size=(1, dim_cnn)).astype(theano.config.floatX),
                           self.args['kGivens'],
                           'v')
         self.container['params_local'] += [v]
@@ -591,46 +590,68 @@ class MainModel(object):
 
         return f_grad_shared, f_update_param #, f_detail
 
+    # def get_local_score_nn(self, rep_cnn, dim_cnn):
+    #     W1 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
+    #                        self.args['kGivens'],
+    #                        'ffnn_W0')
+    #     W2 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
+    #                        self.args['kGivens'],
+    #                        'ffnn_W1')
+    #     b1 = create_shared(0., self.args['kGivens'], 'ffnn_b')
+    #
+    #     dim_pairwise_fea = self.args['features_dim']['pairwise_fea']
+    #     W_pairwise = create_shared(
+    #         np.random.uniform(low=-1., high=1., size=dim_pairwise_fea).astype(theano.config.floatX),
+    #         self.args['kGivens'],
+    #         'pairwise_W')
+    #     dim_row = self.args['max_inst_in_doc'] * self.args['batch']
+    #     pairwise_score = T.dot(self.container['pairwise_fea'], W_pairwise)
+
     def get_local_score_nn(self, rep_cnn, dim_cnn):
+        dim_pairwise_fea = self.args['features_dim']['pairwise_fea']
+        W_pairwise = create_shared(
+            np.random.uniform(low=-1., high=1., size=dim_pairwise_fea).astype(theano.config.floatX),
+            self.args['kGivens'],
+            'pairwise_W')
+        dim_row = self.args['max_inst_in_doc'] * self.args['batch']
+        pairwise_score = T.dot(T.reshape(self.container['pairwise_fea'],
+                                         newshape=(dim_row * self.args['max_inst_in_doc'], dim_pairwise_fea)),
+                               W_pairwise)
+        pairwise_score = T.reshape(pairwise_score, newshape=(dim_row, self.args['max_inst_in_doc']))
+        self.container['params_local'] += [W_pairwise]
+        self.container['names_local'] += ['ffnn_W_pairwise']
+
         def _step(suffix):
-            W1 = create_shared(np.random.uniform(low=-0.2, high=0.2, size=dim_cnn).astype(theano.config.floatX),
+            W1 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
                                self.args['kGivens'],
                                'ffnn_W0_' + suffix)
-            W2 = create_shared(np.random.uniform(low=-0.2, high=0.2, size=dim_cnn).astype(theano.config.floatX),
+            W2 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
                                self.args['kGivens'],
                                'ffnn_W1_' + suffix)
-            b1 = create_shared(0., self.args['kGivens'], 'ffnn_b0_' + suffix)
-            b2 = create_shared(0., self.args['kGivens'], 'ffnn_b1_' + suffix)
-            self.container['params_local'] += [W1, W2, b1, b2]
-            self.container['names_local'] += [item + suffix for item in ['ffnn_W0_', 'ffnn_W1_', 'ffnn_b1_', 'ffnn_b2_']]
+            b = create_shared(0., self.args['kGivens'], 'ffnn_b_' + suffix)
+            self.container['params_local'] += [W1, W2, b]
+            self.container['names_local'] += [item + suffix for item in ['ffnn_W0_', 'ffnn_W1_', 'ffnn_b_']]
 
-            score = T.tanh(T.dot(rep_cnn, W1) + b1) + \
-                        T.reshape(T.tanh(T.dot(rep_cnn, W2) + b2), [self.args['batch'] * self.args['max_inst_in_doc'], 1])
-
+            score = T.dot(rep_cnn, W1) + \
+                    T.reshape(T.dot(rep_cnn, W2), [self.args['batch'] * self.args['max_inst_in_doc'], 1]) + b
             indices_row = np.array([[i] * self.args['max_inst_in_doc']
                                     for i in range(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
             indices_col = np.concatenate(
-                np.array([[[self.args['max_inst_in_doc'] * b + i
+                np.array([[[self.args['max_inst_in_doc'] * batch_index + i
                             for i in range(self.args['max_inst_in_doc'])]] * self.args['max_inst_in_doc']
-                          for b in range(self.args['batch'])], dtype='int32'))
+                          for batch_index in range(self.args['batch'])], dtype='int32'))
             # return T.nnet.nnet.sigmoid(score[indices_row, indices_col])
-            return score[indices_row, indices_col]
+            return T.tanh(score[indices_row, indices_col] + pairwise_score)
         score = T.stack((_step('0'), _step('1')), axis=2)
         score = T.exp(score - T.max(score, axis=2, keepdims=True))
         return score / T.sum(score, axis=2, keepdims=True)
 
     def build_train_local(self, score):
-        row_dim = self.args['max_inst_in_doc'] * self.args['batch']
-        padding = T.alloc(0., row_dim, 1, 2)
-        score = T.concatenate([-T.log(score), padding], axis=1)
+        dim_row = self.args['max_inst_in_doc'] * self.args['batch']
 
-        y = self.container['pairwise_coref']
-        # mask = self.container['mask_pairwise_coref']
-        # cost = -T.sum((y * T.log(score) + (1 - y) * T.log(1 - score)) * mask) / T.sum(mask)
-        col_indices = self.container['col_pairwise_coref']
-        row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in range(row_dim)], dtype='int32')
-        # cost = score[row_indices, col_indices, y]
-        cost = T.sum(score[row_indices, col_indices, y]) / T.sum(T.neq(col_indices, -1))
+        row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in range(dim_row)], dtype='int32')
+        col_indices = np.array([[i for i in range(self.args['max_inst_in_doc'])]] * dim_row, dtype='int32')
+        cost = -T.mean(T.log(score)[row_indices, col_indices, self.container['y']])
 
         gradients = T.grad(cost, self.container['params_local'])
         # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
@@ -639,11 +660,10 @@ class MainModel(object):
         inputs += [self.container['vars'][ed] for ed in self.args['features_event']
                    if self.args['features_event'][ed] >= 0]
         inputs += [self.container['anchor_position'],
-                   self.container['pairwise_coref'],
-                   self.container['mask_pairwise_coref'],
-                   self.container['col_pairwise_coref']]
+                   self.container['pairwise_fea'],
+                   self.container['y']]
 
-        # return theano.function(inputs, [score, cost], on_unused_input='ignore')
+        # return theano.function(inputs, cost, on_unused_input='ignore')
         f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
                                                                      cost,
                                                                      self.container['names_local'],
@@ -736,5 +756,6 @@ class MainModel(object):
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['vars'][ed] for ed in self.args['features_event']
                    if self.args['features_event'][ed] >= 0]
-        inputs += [self.container['anchor_position']]
+        inputs += [self.container['anchor_position'],
+                   self.container['pairwise_fea']]
         return theano.function(inputs, T.argmax(score, axis=2), on_unused_input='ignore')

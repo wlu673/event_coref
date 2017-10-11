@@ -552,7 +552,7 @@ def create_feature_embeddings(map_fea_to_index, embeddings, window):
         print 'Size of', fea, ': ', len(map_fea_to_index[fea])
 
 
-def main(path_src='/scratch/wl1191/event_coref/data/',
+def main(path_src='/scratch/wl1191/event_coref/data/sample/',
          path_realis='realis/',
          path_w2v_bin='/scratch/wl1191/event_coref/data/GoogleNews-vectors-negative300.bin',
          path_w2v_text='/scratch/wl1191/event_coref/data/concatEmbeddings.txt',

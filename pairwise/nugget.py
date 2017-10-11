@@ -443,7 +443,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
         path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
         path_out='/scratch/wl1191/event_coref/out/',
-        path_kGivens='/scratch/wl1191/event_coref/out/params17.pkl',
+        path_kGivens='/scratch/wl1191/event_coref/out/params29.pkl',
         window=31,
         wed_window=2,
         expected_features=OrderedDict([('anchor', 0),
@@ -466,7 +466,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         lr_decay=False,
         norm_lim=0,
         batch=200,
-        nepochs=12,
+        nepochs=30,
         seed=3435,
         verbose=True):
     print '\nLoading dataset:', path_dataset, '...\n'
@@ -550,11 +550,12 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     curr_lr = lr
     print '\nTraining ...\n'
     sys.stdout.flush()
-    for epoch in xrange(18 + nepochs):
+    for epoch in xrange(30, 30 + nepochs):
         train(model, data_train, params, epoch, features, batch, num_batch, verbose)
-
+        sys.stdout.flush()
         if (epoch + 1) % 1 == 0:
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+            sys.stdout.flush()
             for data_eval in data_sets_eval:
                 data, num_added = data_sets_eval[data_eval]
                 predictions[data_eval] = predict(model, data, features, batch)
@@ -583,8 +584,6 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                 curr_lr *= 0.5
             if curr_lr < 1e-5:
                 break
-
-        sys.stdout.flush()
 
     print '\n', '=' * 80, '\n'
     print 'BEST RESULT: Epoch', best_epoch

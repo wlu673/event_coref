@@ -40,12 +40,17 @@ def prepare_features(expected_features, expected_features_event):
             print 'Using feature: %-10s - binary' % fea
 
     features_event = OrderedDict()
+    used = False
     for fea in expected_features_event:
         features_event[fea] = expected_features_event[fea]
         if expected_features_event[fea] == 0:
+            used = True
             print 'Using feature: %-10s - embeddings' % fea
         elif expected_features_event[fea] == 1:
+            used = True
             print 'Using feature: %-10s - binary' % fea
+    if not used:
+        features_event = OrderedDict()
 
     return features, features_event
 
@@ -74,6 +79,7 @@ def get_dim_mapping(embeddings, map_fea_to_index, features, features_event):
 
 def prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, features_event, map_dim_bin, alphas):
     data_sets = {}
+    map_sent_dist_index = {}
     for corpus in corpora:
         data_sets[corpus] = []
         for doc_id in corpora[corpus]:
@@ -92,30 +98,51 @@ def prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, featu
                 if not ret == True:
                     print 'Error in %s corpus in document %s: cannot find index for word %s\n', corpus, doc, ret
                     exit(0)
+
+            data_doc['pairwise_fea'], data_doc['y'] = process_pairs(inst_in_doc,
+                                                                    doc['coreference'],
+                                                                    map_sent_dist_index,
+                                                                    max_lengths['instance'])
+
             num_placeholder = max_lengths['instance'] - len(inst_in_doc)
             window = len(inst_in_doc[0]['word'])
             for i in range(num_placeholder):
                 add_instance_placeholder(data_doc, features, features_event, map_fea_to_index, map_dim_bin, window)
 
-            prev_inst = [0] + [-1] * (max_lengths['instance'] - 1)
-            mask_prev_inst = [0] * max_lengths['instance']
-            for i in range(1, len(inst_in_doc)):
-                data_doc['prev_inst'] += [prev_inst[:]]
-                data_doc['mask_prev_inst'] += [mask_prev_inst[:]]
-                prev_inst[i - 1] = i
-                prev_inst[i] = 0
-                mask_prev_inst[i - 1] = 1
-            data_doc['prev_inst'] += [prev_inst[:]] + [[-1] * max_lengths['instance']] * num_placeholder
-            data_doc['mask_prev_inst'] += [mask_prev_inst[:]] + [[0] * max_lengths['instance']] * num_placeholder
-
-            data_doc['prev_inst'] = np.array(data_doc['prev_inst'], dtype='int32')
-            data_doc['mask_prev_inst'] = np.array(data_doc['mask_prev_inst'], dtype='int32')
-
-            process_cluster(data_doc, max_lengths, doc['coreference'], len(inst_in_doc), num_placeholder, alphas)
+            # prev_inst = [0] + [-1] * (max_lengths['instance'] - 1)
+            # mask_prev_inst = [0] * max_lengths['instance']
+            # for i in range(1, len(inst_in_doc)):
+            #     data_doc['prev_inst'] += [prev_inst[:]]
+            #     data_doc['mask_prev_inst'] += [mask_prev_inst[:]]
+            #     prev_inst[i - 1] = i
+            #     prev_inst[i] = 0
+            #     mask_prev_inst[i - 1] = 1
+            # data_doc['prev_inst'] += [prev_inst[:]] + [[-1] * max_lengths['instance']] * num_placeholder
+            # data_doc['mask_prev_inst'] += [mask_prev_inst[:]] + [[0] * max_lengths['instance']] * num_placeholder
+            #
+            # data_doc['prev_inst'] = np.array(data_doc['prev_inst'], dtype='int32')
+            # data_doc['mask_prev_inst'] = np.array(data_doc['mask_prev_inst'], dtype='int32')
+            #
+            # process_cluster(data_doc, max_lengths, doc['coreference'], len(inst_in_doc), num_placeholder, alphas)
 
             data_doc['doc_id'] = doc_id
             data_doc['inst_id_to_index'] = doc['inst_id_to_index']
             data_sets[corpus] += [data_doc]
+
+    dim_pairwise_fea = len(map_sent_dist_index) + 2
+    for corpus in data_sets:
+        for data_doc in data_sets[corpus]:
+            pairwise_fea = data_doc['pairwise_fea']
+            data_doc['pairwise_fea'] = np.zeros((max_lengths['instance'], max_lengths['instance'], dim_pairwise_fea),
+                                                dtype=theano.config.floatX)
+            num_inst = len(data_doc['inst_id_to_index'])
+            for i in range(num_inst):
+                for j in range(i):
+                    sent_dist =  pairwise_fea[i, j, 2]
+                    sent_dist_vector = np.array([0] * len(map_sent_dist_index), dtype='int32')
+                    sent_dist_vector[map_sent_dist_index[sent_dist]] = 1
+                    data_doc['pairwise_fea'][i, j] = np.concatenate([pairwise_fea[i, j][:2], sent_dist_vector])
+    map_dim_bin['pairwise_fea'] = dim_pairwise_fea
 
     return data_sets
 
@@ -210,6 +237,30 @@ def add_instance_placeholder(data_doc, features, features_event, map_fea_to_inde
     data_doc['anchor_position'] += [0]
 
 
+def process_pairs(inst_in_doc, coref, map_sent_dist_index, max_inst):
+    map_inst_to_cluster = dict()
+    for index, chain in enumerate(coref):
+        for inst in chain:
+            map_inst_to_cluster[inst] = index
+    pairwise_features = np.zeros((max_inst, max_inst, 3), dtype='int32')
+    y = np.zeros((max_inst, max_inst), dtype='int32')
+    for i in range(len(inst_in_doc)):
+        for j in range(i):
+            inst1 = inst_in_doc[i]
+            inst2 = inst_in_doc[j]
+
+            pairwise_features[i, j, 0] = 1 if inst1['type'] == inst2['type'] else 0
+            pairwise_features[i, j, 1] = 1 if inst1['subtype'] == inst2['subtype'] else 0
+            sent_dist = abs(inst1['sentenceId'] - inst2['sentenceId'])
+            if sent_dist not in map_sent_dist_index:
+                map_sent_dist_index[sent_dist] = len(map_sent_dist_index)
+            pairwise_features[i, j, 2] = map_sent_dist_index[sent_dist]
+
+            if map_inst_to_cluster[i] == map_inst_to_cluster[j]:
+                y[i, j] = 1
+
+    return pairwise_features, y
+
 def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alphas):
     map_inst_to_cluster = dict()
     cluster_offset = 0
@@ -251,9 +302,9 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
 
     data_doc['prev_inst_cluster_gold'] = np.array([[-1] * max_lengths['instance']] * max_lengths['instance'],
                                                   dtype='int32')
-    data_doc['pairwise_coref'] = np.array([[0] * max_lengths['instance']] * max_lengths['instance'], dtype='int32')
+    data_doc['y'] = np.array([[0] * max_lengths['instance']] * max_lengths['instance'], dtype='int32')
     for inst_curr in range(num_inst):
-        data_doc['mask_pairwise_coref'] += [[1] * inst_curr + [0] * (max_lengths['instance'] - inst_curr)]
+        data_doc['mask_y'] += [[1] * inst_curr + [0] * (max_lengths['instance'] - inst_curr)]
         chain = coref[map_inst_to_cluster[inst_curr]]
         if chain[0] == inst_curr:
             data_doc['prev_inst_cluster_gold'][inst_curr][inst_curr] = inst_curr
@@ -262,7 +313,7 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
             if inst_prev >= inst_curr:
                 break
             data_doc['prev_inst_cluster_gold'][inst_curr][inst_prev] = inst_prev
-            data_doc['pairwise_coref'][inst_curr][inst_prev] = 1
+            data_doc['y'][inst_curr][inst_prev] = 1
 
     data_doc['cluster'] += [-1] * num_placeholder
     data_doc['mask_rnn'] += [0] * num_placeholder
@@ -270,11 +321,10 @@ def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alp
     data_doc['current_hv'] += [[-1] * max_lengths['cluster']] * num_placeholder
     data_doc['mask_current_hv'] += [[0] * max_lengths['cluster']] * num_placeholder
     data_doc['prev_inst_cluster'] += [[-1] * max_lengths['instance']] * (max_lengths['instance'] - num_inst)
-    data_doc['mask_pairwise_coref'] += [[0] * max_lengths['instance']] * (max_lengths['instance'] - num_inst)
 
     data_doc['alpha'] = get_penalty_rates(inst_init, max_lengths, alphas)
 
-    for item in ['cluster', 'mask_cluster', 'current_hv', 'mask_current_hv', 'mask_pairwise_coref']:
+    for item in ['cluster', 'mask_cluster', 'current_hv', 'mask_current_hv', 'mask_y']:
         data_doc[item] = np.array(data_doc[item], dtype='int32')
 
 
@@ -306,6 +356,7 @@ def get_features_dim(expected_features, expected_features_event, map_dim_bin, ma
         elif expected_features_event[fea] == 0:
             fea_dim = map_dim_emb[fea]
         features_dim[fea] = fea_dim
+    features_dim['pairwise_fea'] = map_dim_bin['pairwise_fea']
     return features_dim
 
 
@@ -353,11 +404,11 @@ def get_batch_inputs(data, features, features_event, batch, max_inst_in_doc):
             inputs_batch[item] += [doc[item] + doc['mask_' + item] * batch * i]
         for item in ['mask_rnn', 'prev_inst_cluster', 'anchor_position']:
             inputs_batch[item] += doc[item]
-        for item in ['prev_inst_cluster_gold', 'alpha', 'pairwise_coref', 'mask_pairwise_coref']:
+        for item in ['prev_inst_cluster_gold', 'alpha', 'pairwise_fea', 'y']:
             inputs_batch[item] += [doc[item]]
         # inputs_batch['prev_inst_cluster_gold'] += [doc['prev_inst_cluster_gold']]
         # inputs_batch['alpha'] += [doc['alpha']]
-        # for item in ['pairwise_coref', 'mask_pairwise_coref']:
+        # for item in ['y', 'mask_y']:
         #     inputs_batch[item] += [np.concatenate([placeholder] * i + [doc[item]] + [placeholder] * (batch-1-i), axis=1)]
     return features_batch, inputs_batch
 
@@ -391,11 +442,8 @@ def get_train_inputs(data, features, features_event, batch, max_inst_in_doc, mod
         # inputs += [np.concatenate(inputs_batch['alpha'])]
     else:
         inputs += [np.array(inputs_batch['anchor_position'], dtype='int32')]
-        for item in ['pairwise_coref', 'mask_pairwise_coref']:
+        for item in ['pairwise_fea', 'y']:
             inputs += [np.concatenate(inputs_batch[item])]
-        col_pairwise_coref = prev_inst - 1
-        col_pairwise_coref[col_pairwise_coref == -2] = -1
-        inputs += [col_pairwise_coref]
 
     return inputs
 
@@ -416,7 +464,8 @@ def get_pred_inputs(data, features, features_event, batch, max_inst_in_doc, mode
             inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
     if 'global' in model_config:
         inputs += [np.concatenate(inputs_batch['prev_inst'])]
-    inputs += [np.array(inputs_batch['anchor_position'], dtype='int32')]
+    inputs += [np.array(inputs_batch['anchor_position'], dtype='int32'),
+               np.concatenate(inputs_batch['pairwise_fea'])]
 
     return inputs
 
@@ -650,15 +699,15 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
                                        ('nonref', -1),
                                        ('title', -1),
                                        ('eligible', -1)]),
-        expected_features_event=OrderedDict([('type', 0), ('subtype', 0), ('realis', -1)]),
+        expected_features_event=OrderedDict([('type', -1), ('subtype', -1), ('realis', -1)]),
         pipeline=False,
         with_word_embs=True,
         update_embs=True,
         cnn_filter_num=40, # 300,
-        cnn_filter_wins=[2, 3, 4, 5], # [2, 3, 4, 5],
+        cnn_filter_wins=[2, 3], # [2, 3, 4, 5],
         dropout=0.5,
-        multilayer_nn=[160, 80, 40], # [600, 300],
-        dim_cnn=40, # 300,
+        multilayer_nn=[80, 40], # [600, 300],
+        # dim_cnn=40, # 300,
         optimizer='adadelta',
         lr=0.05,
         lr_decay=False,
@@ -684,14 +733,15 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
     data_sets = prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, features_event, map_dim_bin, alphas)
 
     # print corpora['train'][data_sets['train'][0]['doc_id']]['gold_coreference'], '\n'
-    # print len(data_sets['train'][0]['inst_id_to_index']), '\n'
-    # print data_sets['train'][0]['col_pairwise_coref'], '\n'
+    # print data_sets['train'][0]['pairwise_fea'], '\n'
+    # print data_sets['train'][0]['y'], '\n'
 
     features_dim = get_features_dim(expected_features, expected_features_event, map_dim_bin, map_dim_emb)
 
     kGivens = dict()
     if path_kGivens is not None:
         kGivens = cPickle.load(open(path_kGivens, 'r'))
+
 
     params = {'features': features,
               'features_event': features_event,
@@ -703,7 +753,6 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
               'cnn_filter_wins': cnn_filter_wins,
               'dropout': dropout,
               'multilayer_nn': multilayer_nn,
-              'dim_cnn': dim_cnn,
               'optimizer': optimizer,
               'lr': lr,
               'norm_lim': norm_lim,
@@ -753,7 +802,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
             break
 
     print 'Saving parameters ...'
-    model.save(path_out + 'params_no_dropout' + '.pkl')
+    model.save(path_out + 'params' + '.pkl')
 
     print '\nTesting ...'
     data, num_added = fit_data_to_batch(data_sets['valid'], batch)
