@@ -89,8 +89,12 @@ def prepare_data(corpora, prefix, map_fea_to_index, features, features_dim):
             sent_dist_vector[sent_dist_index] = 1
             match_type = coref_features_all[corpus]['match_type'][index]
             match_subtype = coref_features_all[corpus]['match_subtype'][index]
-            data_sets[corpus]['inst_pairs']['coref_features'] += [sent_dist_vector + [match_type] + [match_subtype]]
-    features_dim['coref_features'] = len(map_sent_dist_index) + 2
+            match_realis = coref_features_all[corpus]['match_realis'][index]
+            data_sets[corpus]['inst_pairs']['coref_features'] += [sent_dist_vector +
+                                                                  [match_type] +
+                                                                  [match_subtype] +
+                                                                  [match_realis]]
+    features_dim['coref_features'] = len(map_sent_dist_index) + 3
 
     return data_sets
 
@@ -157,6 +161,7 @@ def create_pairs(inst_pairs, data_doc, inst_in_doc, coref, map_sent_dist_index, 
             inst2 = inst_in_doc[j]
             coref_features['match_type'] += [1 if inst1['type'] == inst2['type'] else 0]
             coref_features['match_subtype'] += [1 if inst1['subtype'] == inst2['subtype'] else 0]
+            coref_features['match_realis'] += [1 if inst1['realis'] == inst2['realis'] else 0]
             sent_dist = abs(inst1['sentenceId'] - inst2['sentenceId'])
             if sent_dist not in map_sent_dist_index:
                 map_sent_dist_index[sent_dist] = len(map_sent_dist_index)
@@ -441,9 +446,9 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
         path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
-        path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
-        path_out='/scratch/wl1191/event_coref/out/',
-        path_kGivens='/scratch/wl1191/event_coref/out/params29.pkl',
+        path_conllTemp='/scratch/wl1191/event_coref/data/coref_no_dropout/conllTempFile_Coreference.txt',
+        path_out='/scratch/wl1191/event_coref/out_no_dropout/',
+        path_kGivens=None,  # '/scratch/wl1191/event_coref/out/params29.pkl',
         window=31,
         wed_window=2,
         expected_features=OrderedDict([('anchor', 0),
@@ -459,12 +464,12 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         update_embs=True,
         cnn_filter_num=300,
         cnn_filter_wins=[2, 3, 4, 5],
-        dropout=0.5,
+        dropout=0.,
         multilayer_nn=[600, 300],
         optimizer='adadelta',
         lr=0.05,
         lr_decay=False,
-        norm_lim=0,
+        norm_lim=0.,
         batch=200,
         nepochs=30,
         seed=3435,
@@ -503,8 +508,8 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                        'with_word_embs': with_word_embs,
                        'update_embs': update_embs})
 
-    # print 'Saving model configuration ...'
-    # cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
+    print 'Saving model configuration ...'
+    cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
 
     data_train, _ = fit_data_to_batch(data_sets['train']['inst_pairs'], batch)
     num_batch = len(data_train['word1']) / batch
@@ -550,10 +555,10 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     curr_lr = lr
     print '\nTraining ...\n'
     sys.stdout.flush()
-    for epoch in xrange(30, 30 + nepochs):
+    for epoch in xrange(nepochs):
         train(model, data_train, params, epoch, features, batch, num_batch, verbose)
         sys.stdout.flush()
-        if (epoch + 1) % 1 == 0:
+        if epoch >= 0:
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
             sys.stdout.flush()
             for data_eval in data_sets_eval:
@@ -584,6 +589,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
                 curr_lr *= 0.5
             if curr_lr < 1e-5:
                 break
+            sys.stdout.flush()
 
     print '\n', '=' * 80, '\n'
     print 'BEST RESULT: Epoch', best_epoch

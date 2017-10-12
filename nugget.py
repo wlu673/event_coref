@@ -129,19 +129,21 @@ def prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, featu
             data_doc['inst_id_to_index'] = doc['inst_id_to_index']
             data_sets[corpus] += [data_doc]
 
-    dim_pairwise_fea = len(map_sent_dist_index) + 2
+    dim_pairwise_fea = len(map_sent_dist_index) + 3
+    dim_row = max_lengths['instance'] * (max_lengths['instance'] - 1) / 2
     for corpus in data_sets:
         for data_doc in data_sets[corpus]:
             pairwise_fea = data_doc['pairwise_fea']
-            data_doc['pairwise_fea'] = np.zeros((max_lengths['instance'], max_lengths['instance'], dim_pairwise_fea),
-                                                dtype=theano.config.floatX)
+            data_doc['pairwise_fea'] = np.zeros((dim_row, dim_pairwise_fea), dtype=theano.config.floatX)
             num_inst = len(data_doc['inst_id_to_index'])
+            index = 0
             for i in range(num_inst):
                 for j in range(i):
-                    sent_dist =  pairwise_fea[i, j, 2]
+                    sent_dist = pairwise_fea[index, 3]
                     sent_dist_vector = np.array([0] * len(map_sent_dist_index), dtype='int32')
                     sent_dist_vector[map_sent_dist_index[sent_dist]] = 1
-                    data_doc['pairwise_fea'][i, j] = np.concatenate([pairwise_fea[i, j][:2], sent_dist_vector])
+                    data_doc['pairwise_fea'][index] = np.concatenate([pairwise_fea[index][:3], sent_dist_vector])
+                    index += 1
     map_dim_bin['pairwise_fea'] = dim_pairwise_fea
 
     return data_sets
@@ -242,24 +244,29 @@ def process_pairs(inst_in_doc, coref, map_sent_dist_index, max_inst):
     for index, chain in enumerate(coref):
         for inst in chain:
             map_inst_to_cluster[inst] = index
-    pairwise_features = np.zeros((max_inst, max_inst, 3), dtype='int32')
-    y = np.zeros((max_inst, max_inst), dtype='int32')
+    dim_row = max_inst * (max_inst - 1) / 2
+    pairwise_features = np.zeros((dim_row, 4), dtype='int32')
+    y = np.zeros(dim_row, dtype='int32')
+    index = 0
     for i in range(len(inst_in_doc)):
         for j in range(i):
             inst1 = inst_in_doc[i]
             inst2 = inst_in_doc[j]
 
-            pairwise_features[i, j, 0] = 1 if inst1['type'] == inst2['type'] else 0
-            pairwise_features[i, j, 1] = 1 if inst1['subtype'] == inst2['subtype'] else 0
+            pairwise_features[index, 0] = 1 if inst1['type'] == inst2['type'] else 0
+            pairwise_features[index, 1] = 1 if inst1['subtype'] == inst2['subtype'] else 0
+            pairwise_features[index, 2] = 1 if inst1['realis'] == inst2['realis'] else 0
             sent_dist = abs(inst1['sentenceId'] - inst2['sentenceId'])
             if sent_dist not in map_sent_dist_index:
                 map_sent_dist_index[sent_dist] = len(map_sent_dist_index)
-            pairwise_features[i, j, 2] = map_sent_dist_index[sent_dist]
+            pairwise_features[index, 3] = map_sent_dist_index[sent_dist]
 
             if map_inst_to_cluster[i] == map_inst_to_cluster[j]:
-                y[i, j] = 1
+                y[index] = 1
+            index += 1
 
     return pairwise_features, y
+
 
 def process_cluster(data_doc, max_lengths, coref, num_inst, num_placeholder, alphas):
     map_inst_to_cluster = dict()
@@ -503,67 +510,88 @@ def predict(model, data, features, features_event, batch, max_inst_in_doc, model
                                       batch,
                                       max_inst_in_doc,
                                       model_config)
-        cluster_batch = model.predict(*inputs_pred)
-        # cluster_batch = preds[batch_index]
-        for doc_index in range(batch):
-            doc = data[batch_index * batch + doc_index]
-            inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
-            coref = defaultdict(list)
-            if 'global' in model_config:
-                for inst_index in range(len(inst_index_to_id)):
-                    coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
-                for chain in doc['missing_inst']:
-                    cluster_new = len(coref) + 1
-                    for inst in chain:
-                        if chain[inst] is None:
-                            coref[cluster_new] += [inst]
-                        else:
-                            cluster_index = cluster_batch[doc_index][chain[inst]]
-                            coref[cluster_index] += [inst]
-            else:
-                offset = doc_index * max_inst_in_doc
-                map_inst_to_cluster = dict()
-                clusters_curr = defaultdict(list)
-                for inst_curr in range(len(inst_index_to_id)):
-                    clusters_ante = []
-                    for inst_ante in range(inst_curr):
-                        if cluster_batch[offset + inst_curr][inst_ante] == 1 and \
-                                        map_inst_to_cluster[inst_ante] not in clusters_ante:
-                                clusters_ante += [map_inst_to_cluster[inst_ante]]
-                    if len(clusters_ante) == 0:
-                        map_inst_to_cluster[inst_curr] = len(clusters_curr)
-                        clusters_curr[len(clusters_curr)] += [inst_curr]
-                    elif len(clusters_ante) == 1:
-                        map_inst_to_cluster[inst_curr] = clusters_ante[0]
-                        clusters_curr[clusters_ante[0]] += [inst_curr]
-                    else:
-                        clusters_to_merge = []
-                        clusters_new = defaultdict(list)
-                        for cluster_index, chain in clusters_curr.iteritems():
-                            if cluster_index in clusters_ante:
-                                clusters_to_merge += chain
-                            else:
-                                for inst_index in chain:
-                                    map_inst_to_cluster[inst_index] = len(clusters_new)
-                                clusters_new[len(clusters_new)] = chain
-                        clusters_to_merge += [inst_curr]
-                        for inst_index in clusters_to_merge:
-                            map_inst_to_cluster[inst_index] = len(clusters_new)
-                        clusters_new[len(clusters_new)] = clusters_to_merge
-                        clusters_curr = clusters_new
-                for cluster_index, chain in clusters_curr.iteritems():
-                    coref[cluster_index] = [inst_index_to_id[inst_index] for inst_index in chain]
-                for chain in doc['missing_inst']:
-                    cluster_new = len(coref) + 1
-                    for inst in chain:
-                        if chain[inst] is None:
-                            coref[cluster_new] += [inst]
-                        else:
-                            cluster_index = map_inst_to_cluster[chain[inst]]
-                            coref[cluster_index] += [inst]
-            predictions += [coref.values()]
+        if 'global' in model_config:
+            predict_global(model, data, batch, batch_index, inputs_pred, predictions)
+        else:
+            predict_local(model, data, batch, batch_index, max_inst_in_doc, inputs_pred, predictions)
 
     return predictions
+
+
+def predict_global(model, data, batch, batch_index, inputs_pred, predictions):
+    cluster_batch = model.predict(*inputs_pred)
+    for doc_index in range(batch):
+        doc = data[batch_index * batch + doc_index]
+        inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
+        coref = defaultdict(list)
+        for inst_index in range(len(inst_index_to_id)):
+            coref[cluster_batch[doc_index][inst_index]] += [inst_index_to_id[inst_index]]
+        for chain in doc['missing_inst']:
+            cluster_new = len(coref) + 1
+            for inst in chain:
+                if chain[inst] is None:
+                    coref[cluster_new] += [inst]
+                else:
+                    cluster_index = cluster_batch[doc_index][chain[inst]]
+                    coref[cluster_index] += [inst]
+        predictions += [coref.values()]
+
+
+def predict_local(model, data, batch, batch_index, max_inst_in_doc, inputs_pred, predictions):
+    prediction_batch_pairs = model.predict(*inputs_pred)
+    prediction_batch = np.zeros((batch * max_inst_in_doc, max_inst_in_doc), dtype='int32')
+    index = 0
+    for i in range(batch * max_inst_in_doc):
+        for j in range(i % max_inst_in_doc):
+            if prediction_batch_pairs[index] == 1:
+                prediction_batch[i, j] = 1
+            index += 1
+
+    for doc_index in range(batch):
+        doc = data[batch_index * batch + doc_index]
+        inst_index_to_id = dict((k, v) for v, k in doc['inst_id_to_index'].iteritems())
+        coref = defaultdict(list)
+        offset = doc_index * max_inst_in_doc
+        map_inst_to_cluster = dict()
+        clusters_curr = defaultdict(list)
+        for inst_curr in range(len(inst_index_to_id)):
+            clusters_ante = []
+            for inst_ante in range(inst_curr):
+                if prediction_batch[offset + inst_curr][inst_ante] == 1 and \
+                                map_inst_to_cluster[inst_ante] not in clusters_ante:
+                        clusters_ante += [map_inst_to_cluster[inst_ante]]
+            if len(clusters_ante) == 0:
+                map_inst_to_cluster[inst_curr] = len(clusters_curr)
+                clusters_curr[len(clusters_curr)] += [inst_curr]
+            elif len(clusters_ante) == 1:
+                map_inst_to_cluster[inst_curr] = clusters_ante[0]
+                clusters_curr[clusters_ante[0]] += [inst_curr]
+            else:
+                clusters_to_merge = []
+                clusters_new = defaultdict(list)
+                for cluster_index, chain in clusters_curr.iteritems():
+                    if cluster_index in clusters_ante:
+                        clusters_to_merge += chain
+                    else:
+                        for inst_index in chain:
+                            map_inst_to_cluster[inst_index] = len(clusters_new)
+                        clusters_new[len(clusters_new)] = chain
+                clusters_to_merge += [inst_curr]
+                for inst_index in clusters_to_merge:
+                    map_inst_to_cluster[inst_index] = len(clusters_new)
+                clusters_new[len(clusters_new)] = clusters_to_merge
+                clusters_curr = clusters_new
+        for cluster_index, chain in clusters_curr.iteritems():
+            coref[cluster_index] = [inst_index_to_id[inst_index] for inst_index in chain]
+        for chain in doc['missing_inst']:
+            cluster_new = len(coref) + 1
+            for inst in chain:
+                if chain[inst] is None:
+                    coref[cluster_new] += [inst]
+                else:
+                    cluster_index = map_inst_to_cluster[chain[inst]]
+                    coref[cluster_index] += [inst]
+        predictions += [coref.values()]
 
 
 def write_out(epoch, data_eval, data, predictions, realis_output, path_out):
@@ -680,14 +708,14 @@ def print_perf(performance, msg):
     print '-' * 80
 
 
-def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
-        path_realis='/scratch/wl1191/event_coref/data/sample/realis/',
+def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
+        path_realis='/scratch/wl1191/event_coref/data/realis/',
         path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
         path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
-        path_conllTemp='/scratch/wl1191/event_coref/data/sample/coref/conllTempFile_Coreference.txt',
-        path_out='/scratch/wl1191/event_coref/data/sample/out/',
-        path_kGivens=None,
+        path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
+        path_out='/scratch/wl1191/event_coref/out/',
+        path_kGivens=None,  # '/scratch/wl1191/event_coref/out/params.pkl',
         model_config='local',
         window=31,
         wed_window=2,
@@ -703,18 +731,17 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
         pipeline=False,
         with_word_embs=True,
         update_embs=True,
-        cnn_filter_num=40, # 300,
-        cnn_filter_wins=[2, 3], # [2, 3, 4, 5],
+        cnn_filter_num=300,
+        cnn_filter_wins=[2, 3, 4, 5],
         dropout=0.5,
-        multilayer_nn=[80, 40], # [600, 300],
-        # dim_cnn=40, # 300,
+        multilayer_nn=[600, 300],
         optimizer='adadelta',
         lr=0.05,
         lr_decay=False,
         norm_lim=0,
         alphas=(0.5, 1.2, 1),
-        batch=3,
-        nepochs=100,
+        batch=10,
+        nepochs=2,
         seed=3435,
         verbose=True):
 
@@ -742,7 +769,6 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
     if path_kGivens is not None:
         kGivens = cPickle.load(open(path_kGivens, 'r'))
 
-
     params = {'features': features,
               'features_event': features_event,
               'features_dim': features_dim,
@@ -769,8 +795,8 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
                        'update_embs': update_embs,
                        'alphas': alphas})
 
-    # print 'Saving model configuration ...'
-    # cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
+    print 'Saving model configuration ...'
+    cPickle.dump(params_all, open(path_out + 'model_config.pkl', 'w'))
 
     data_train, _ = fit_data_to_batch(data_sets['train'], batch)
     num_batch = len(data_train) / batch
@@ -793,73 +819,76 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
     #                                 max_lengths['instance'],
     #                                 model_config)
     #
+    # print model.train(*inputs_train)
+    #
     # print train(model, data_train, params, 0, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
     # predictions = predict(model, data_train, features, features_event, batch, max_lengths['instance'], model_config)
     # print predictions
 
-    for i in range(1000):
-        if train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose) == 0.:
-            break
-
-    print 'Saving parameters ...'
-    model.save(path_out + 'params' + '.pkl')
-
-    print '\nTesting ...'
-    data, num_added = fit_data_to_batch(data_sets['valid'], batch)
-    # preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
-    predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
-    # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
-    if num_added > 0:
-        predictions = predictions[:-num_added]
-    print 'Writing out ...'
-    write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
+    # for i in range(1000):
+    #     if train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose) == 0.:
+    #         break
+    #
+    # print 'Saving parameters ...'
+    # model.save(path_out + 'params' + '.pkl')
+    #
+    # print '\nTesting ...'
+    # data, num_added = fit_data_to_batch(data_sets['valid'], batch)
+    # # preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
+    # predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+    # # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
+    # if num_added > 0:
+    #     predictions = predictions[:-num_added]
+    # print 'Writing out ...'
+    # write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
 
     # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
     #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
-    # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
-    # predictions = OrderedDict()
-    # best_f1 = -np.inf
-    # best_performance = None
-    # best_epoch = -1
-    # curr_lr = lr
-    # print '\nTraining ...\n'
-    # for epoch in xrange(nepochs):
-    #     train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
-    #
-    #     if (epoch + 1) % 10 == 0:
-    #         print (' Evaluating in epoch %d ' % epoch).center(80, '-')
-    #         for data_eval in data_sets_eval:
-    #             data, num_added = data_sets_eval[data_eval]
-    #             predictions[data_eval] = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
-    #             if num_added > 0:
-    #                 predictions[data_eval] = predictions[data_eval][:-num_added]
-    #             write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
-    #
-    #         path_output = path_out + 'valid.coref.pred' + str(epoch)
-    #         performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
-    #
-    #         print 'Saving parameters'
-    #         model.save(path_out + 'params' + str(epoch) + '.pkl')
-    #
-    #         if performance['averageCoref'] > best_f1:
-    #             best_f1 = performance['averageCoref']
-    #             best_performance = performance
-    #             best_epoch = epoch
-    #             print 'NEW BEST: Epoch', epoch
-    #         if verbose:
-    #             print_perf(performance, 'Current Performance')
-    #
-    #         # learning rate decay if no improvement in 10 epochs
-    #         if lr_decay and abs(best_epoch - epoch) >= 10:
-    #             curr_lr *= 0.5
-    #         if curr_lr < 1e-5:
-    #             break
-    #
-    #     sys.stdout.flush()
-    #
-    # print '\n', '=' * 80, '\n'
-    # print 'BEST RESULT: Epoch', best_epoch
-    # print_perf(best_performance, 'Best Performance')
+    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
+    predictions = OrderedDict()
+    best_f1 = -np.inf
+    best_performance = None
+    best_epoch = -1
+    curr_lr = lr
+    print '\nTraining ...\n'
+    for epoch in xrange(nepochs):
+        train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
+
+        # if (epoch + 1) % 10 == 0:
+        if epoch >= 0:
+            print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+            for data_eval in data_sets_eval:
+                data, num_added = data_sets_eval[data_eval]
+                predictions[data_eval] = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+                if num_added > 0:
+                    predictions[data_eval] = predictions[data_eval][:-num_added]
+                write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
+
+            path_output = path_out + 'valid.coref.pred' + str(epoch)
+            performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
+
+            print 'Saving parameters'
+            model.save(path_out + 'params' + str(epoch) + '.pkl')
+
+            if performance['averageCoref'] > best_f1:
+                best_f1 = performance['averageCoref']
+                best_performance = performance
+                best_epoch = epoch
+                print 'NEW BEST: Epoch', epoch
+            if verbose:
+                print_perf(performance, 'Current Performance')
+
+            # learning rate decay if no improvement in 10 epochs
+            if lr_decay and abs(best_epoch - epoch) >= 10:
+                curr_lr *= 0.5
+            if curr_lr < 1e-5:
+                break
+
+        sys.stdout.flush()
+
+    print '\n', '=' * 80, '\n'
+    print 'BEST RESULT: Epoch', best_epoch
+    print_perf(best_performance, 'Best Performance')
 
 
 if __name__ == '__main__':
