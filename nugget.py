@@ -715,7 +715,7 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
         path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
         path_out='/scratch/wl1191/event_coref/out/',
-        path_kGivens=None,  # '/scratch/wl1191/event_coref/out/params.pkl',
+        path_kGivens='/scratch/wl1191/event_coref/params49.pkl',
         model_config='local',
         window=31,
         wed_window=2,
@@ -734,14 +734,15 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         cnn_filter_num=300,
         cnn_filter_wins=[2, 3, 4, 5],
         dropout=0.5,
-        multilayer_nn=[600, 300],
+        multilayer_nn_cnn=[600, 300],
+        multilayer_nn_pair=[600, 300],
         optimizer='adadelta',
         lr=0.05,
         lr_decay=False,
         norm_lim=0,
         alphas=(0.5, 1.2, 1),
-        batch=10,
-        nepochs=2,
+        batch=2,
+        nepochs=300,
         seed=3435,
         verbose=True):
 
@@ -778,7 +779,8 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
               'cnn_filter_num': cnn_filter_num,
               'cnn_filter_wins': cnn_filter_wins,
               'dropout': dropout,
-              'multilayer_nn': multilayer_nn,
+              'multilayer_nn_cnn': multilayer_nn_cnn,
+              'multilayer_nn_pair': multilayer_nn_pair,
               'optimizer': optimizer,
               'lr': lr,
               'norm_lim': norm_lim,
@@ -851,11 +853,11 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     best_epoch = -1
     curr_lr = lr
     print '\nTraining ...\n'
-    for epoch in xrange(nepochs):
+    for epoch in xrange(50, 50 + nepochs):
         train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
 
-        # if (epoch + 1) % 10 == 0:
-        if epoch >= 0:
+        if (epoch + 1) % 5 == 0:
+        # if epoch >= 0:
             print (' Evaluating in epoch %d ' % epoch).center(80, '-')
             for data_eval in data_sets_eval:
                 data, num_added = data_sets_eval[data_eval]

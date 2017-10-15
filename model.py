@@ -490,7 +490,7 @@ class MainModel(object):
             rep_inter = T.concatenate([rep_inter, rep_contexts], axis=1)
             dim_inter += dim_contexts
 
-        if self.args['dropout'] > 0:
+        if self.args['dropout'] > 0.:
             rep_inter = dropout_from_layer(self.args['rng'], [rep_inter], self.args['dropout'])[0]
 
         if len(self.args['features_event']) > 0:
@@ -502,13 +502,13 @@ class MainModel(object):
             rep_inter = T.concatenate([rep_inter, rep_event], axis=1)
             dim_inter += self.container['fea_event_dim']
 
-        dim_hids = [dim_inter] + self.args['multilayer_nn']
+        dim_hids = [dim_inter] + self.args['multilayer_nn_cnn']
 
         rep_cnn = multi_hidden_layers([rep_inter],
                                       dim_hids,
                                       self.container['params_local'],
                                       self.container['names_local'],
-                                      'main_multi_nn',
+                                      'main_multi_nn_cnn',
                                       self.args['kGivens'])[0]
         dim_cnn = dim_hids[-1]
 
@@ -592,37 +592,38 @@ class MainModel(object):
         return f_grad_shared, f_update_param #, f_detail
 
     def get_local_score_nn(self, rep_cnn, dim_cnn):
-        def _step(suffix):
-            W1 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
-                               self.args['kGivens'],
-                               'ffnn_W0_' + suffix)
-            W2 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
-                               self.args['kGivens'],
-                               'ffnn_W1_' + suffix)
+        indices_pair = np.array([[i, (i - i % self.args['max_inst_in_doc']) + j]
+                                 for i in range(self.args['max_inst_in_doc'] * self.args['batch'])
+                                 for j in range(i % self.args['max_inst_in_doc'])], dtype='int32')
+        rep_pair = T.reshape(rep_cnn[indices_pair], newshape=(indices_pair.shape[0], 2 * dim_cnn))
+        rep_pair = T.concatenate([rep_pair, self.container['pairwise_fea']], axis=1)
+        dim_pair = 2 * dim_cnn + self.args['features_dim']['pairwise_fea']
 
-            score = T.stack([T.dot(rep_cnn, W1), T.dot(rep_cnn, W2)], axis=1)
-            indices_pair_row = np.array([[i, (i - i % self.args['max_inst_in_doc']) + j]
-                                         for i in range(self.args['max_inst_in_doc'] * self.args['batch'])
-                                         for j in range(i % self.args['max_inst_in_doc'])], dtype='int32')
-            indices_pair_col = np.array([[0, 1]] * indices_pair_row.shape[0], dtype='int32')
-            score = T.sum(score[indices_pair_row, indices_pair_col], axis=1)
+        dim_hids = [dim_pair] + self.args['multilayer_nn_pair']
 
-            dim_pairwise_fea = self.args['features_dim']['pairwise_fea']
-            W_pairwise = create_shared(
-                np.random.uniform(low=-1., high=1., size=dim_pairwise_fea).astype(theano.config.floatX),
-                self.args['kGivens'],
-                'ffnn_W_pairwise_' + suffix)
-            pairwise_score = T.dot(self.container['pairwise_fea'], W_pairwise)
+        rep_inter = multi_hidden_layers([rep_pair],
+                                        dim_hids,
+                                        self.container['params_local'],
+                                        self.container['names_local'],
+                                        'main_multi_nn_pair',
+                                        self.args['kGivens'])[0]
+        dim_inter = dim_hids[-1]
 
-            b = create_shared(0., self.args['kGivens'], 'ffnn_b_' + suffix)
+        fW = create_shared(np.random.uniform(low=-1.0, high=1.0, size=(dim_inter, 2)).astype(theano.config.floatX),
+                           self.args['kGivens'],
+                           'ffnn_W')
+        fb = create_shared(np.array([0., 0.], dtype=theano.config.floatX), self.args['kGivens'], 'ffnn_b')
+        self.container['params_local'] += [fW, fb]
+        self.container['names_local'] += ['ffnn_W', 'ffnn_b']
 
-            self.container['params_local'] += [W1, W2, W_pairwise, b]
-            self.container['names_local'] += [item + suffix for item in ['ffnn_W0_', 'ffnn_W1_', 'ffnn_W_pairwise_', 'ffnn_b_']]
+        if self.args['dropout'] > 0.:
+            score = T.nnet.softmax(T.dot(rep_inter, (1.0 - self.args['dropout']) * fW) + fb)
+        else:
+            score = T.nnet.softmax(T.dot(rep_inter, fW) + fb)
 
-            # return T.tanh(score + pairwise_score + b)
-            return T.nnet.nnet.sigmoid(score + pairwise_score + b)
-        # return T.nnet.nnet.softmax(T.stack((_step('0'), _step('1')), axis=1))
-        return _step('0')
+        # return T.tanh(score + pairwise_score + b)
+        # return T.nnet.nnet.sigmoid(score + pairwise_score + b)
+        return score
 
     # def get_local_score_nn(self, rep_cnn, dim_cnn):
     #     dim_pairwise_fea = self.args['features_dim']['pairwise_fea']
@@ -669,7 +670,8 @@ class MainModel(object):
         # row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in range(dim_row)], dtype='int32')
         # col_indices = np.array([[i for i in range(self.args['max_inst_in_doc'])]] * dim_row, dtype='int32')
         # cost = -T.mean(T.log(score)[T.arange(self.container['y'].shape[0]), self.container['y']])
-        cost = -T.sum(T.log(score) * self.container['y'] + T.log(1 - score) * (1 - self.container['y']))
+        # cost = -T.sum(T.log(score) * self.container['y'] + T.log(1 - score) * (1 - self.container['y']))
+        cost = -T.mean(T.log(score)[T.arange(self.container['y'].shape[0]), self.container['y']])
 
         gradients = T.grad(cost, self.container['params_local'])
         # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
@@ -776,5 +778,5 @@ class MainModel(object):
                    if self.args['features_event'][ed] >= 0]
         inputs += [self.container['anchor_position'],
                    self.container['pairwise_fea']]
-        # return theano.function(inputs, T.argmax(score, axis=1), on_unused_input='ignore')
-        return theano.function(inputs, score > 0.5, on_unused_input='ignore')
+        return theano.function(inputs, T.argmax(score, axis=1), on_unused_input='ignore')
+        # return theano.function(inputs, score > 0.5, on_unused_input='ignore')
