@@ -242,11 +242,11 @@ def multi_hidden_layers(inputs, dim_hids, params, names, prefix, kGivens):
     index = 0
     for dim_in, dim_out in zip(dim_hids, dim_hids[1:]):
         index += 1
-        hidden_vector = hidden_layer(hidden_vector, dim_in, dim_out, params, names, prefix + '_layer' + str(index), kGivens)
+        hidden_vector, _ = hidden_layer(hidden_vector, dim_in, dim_out, params, names, prefix + '_layer' + str(index), kGivens)
     return hidden_vector
 
 
-def hidden_layer(inputs, dim_in, dim_out, params, names, prefix, kGivens):
+def hidden_layer(inputs, dim_in, dim_out, params, names, prefix, kGivens, dropout=0.):
     bound = np.sqrt(6. / (dim_in + dim_out))
     W = create_shared(np.random.uniform(low=-bound, high=bound, size=(dim_in, dim_out)).astype(theano.config.floatX),
                       kGivens,
@@ -254,13 +254,16 @@ def hidden_layer(inputs, dim_in, dim_out, params, names, prefix, kGivens):
     b = create_shared(np.zeros(dim_out, dtype=theano.config.floatX), kGivens, prefix + '_b')
     res = []
     for x in inputs:
-        out = T.nnet.sigmoid(T.dot(x, W) + b)
+        if dropout > 0.:
+            out = T.nnet.sigmoid(T.dot(x, (1.0 - dropout) * W) + b)
+        else:
+            out = T.nnet.sigmoid(T.dot(x, W) + b)
         res += [out]
 
     params += [W, b]
     names += [prefix + '_W', prefix + '_b']
 
-    return res
+    return res, (W, b)
 
 
 ###########################################################################
@@ -379,19 +382,27 @@ class MainModel(object):
         self.define_vars()
 
         rep_cnn, dim_cnn = self.get_cnn_rep()
-        if 'global' in self.args['model_config']:
+        if 'dot' in self.args['model_config']:
             local_score = self.get_local_score_dot(rep_cnn, dim_cnn)
-            global_score, gru_params = self.get_global_score(rep_cnn, dim_cnn)
+            global_score, gru_params = self.get_global_score_dot(rep_cnn, dim_cnn)
             # self.train = self.build_train(local_score, global_score)
-            self.f_grad_shared, self.f_update_param = self.build_train_combined(local_score, global_score)
-            self.predict = self.build_predict_combined(rep_cnn, dim_cnn, local_score, gru_params)
+            self.f_grad_shared, self.f_update_param = self.build_train_combined(local_score, global_score, 'dot')
+            self.predict = self.build_predict_combined_dot(rep_cnn, dim_cnn, local_score, gru_params)
         else:
-            score = self.get_local_score_nn(rep_cnn, dim_cnn)
-            # self.train = self.get_local_score_nn(rep_cnn, dim_cnn)
-            # self.train = theano.function(inputs, outputs=score, on_unused_input='ignore')
-            # self.train = self.build_train_local(score)
-            self.f_grad_shared, self.f_update_param = self.build_train_local(score)
-            self.predict = self.build_predict_local(score)
+            rep_pairwise, dim_pairwise = self.get_pairwise_rep(rep_cnn, dim_cnn)
+            if 'combined' in self.args['model_config']:
+                local_score = self.get_local_score_nn(rep_cnn, dim_cnn, rep_pairwise, dim_pairwise)
+                global_score, gru_params, ffnn_params = self.get_global_score_nn(rep_cnn, dim_cnn)
+                # self.train = self.build_train_combined(local_score, global_score, 'nn')
+                self.f_grad_shared, self.f_update_param = self.build_train_combined(local_score, global_score, 'nn')
+                self.predict = self.build_predict_combined_nn(rep_cnn, dim_cnn, local_score, gru_params, ffnn_params)
+            else:
+                score = self.get_pairwise_score_nn(rep_pairwise, dim_pairwise)
+                # self.train = self.get_local_score_nn(rep_cnn, dim_cnn)
+                # self.train = theano.function(inputs, outputs=score, on_unused_input='ignore')
+                # self.train = self.build_train_local(score)
+                self.f_grad_shared, self.f_update_param = self.build_train_pair_nn(score)
+                self.predict = self.build_predict_pairwise_nn(score)
 
         self.container['set_zero'] = OrderedDict()
         self.container['zero_vecs'] = OrderedDict()
@@ -471,10 +482,10 @@ class MainModel(object):
         self.container['cluster'] = T.ivector('cluster')
         self.container['mask_rnn'] = T.vector('mask_rnn')
         self.container['current_hv'] = T.imatrix('current_hv')
+        self.container['prev_inst_hv'] = T.ivector('prev_inst_hv')
         self.container['prev_inst'] = T.imatrix('prev_inst')
         self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
         self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
-        self.container['antecedents'] = T.imatrix('antecedents')
         self.container['alpha'] = T.matrix('alpha')
         self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['pairwise_fea'] = T.matrix('pairwise_fea')
@@ -525,7 +536,7 @@ class MainModel(object):
         local_score = T.batched_dot(rep_cnn, prev_inst.dimshuffle(0, 2, 1))
         return local_score
 
-    def get_global_score(self, rep_cnn, dim_cnn):
+    def get_global_score_dot(self, rep_cnn, dim_cnn):
         padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
         X = padded[self.container['cluster']]
         rep_rnn, gru_params = rnn_gru(X,
@@ -551,7 +562,7 @@ class MainModel(object):
         global_score = score_by_cluster[row_indices, self.container['prev_inst_cluster']]
         return global_score, gru_params
 
-    def build_train_combined(self, local_score, global_score):
+    def build_train_combined(self, local_score, global_score, model_config):
         total_score = local_score + global_score
         latent_score, alpha, latent_inst = self.get_latent(total_score)
         cost = T.sum(T.max(alpha * (1 + total_score - latent_score), axis=1))
@@ -565,6 +576,8 @@ class MainModel(object):
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['vars'][ed] for ed in self.args['features_event']
                    if self.args['features_event'][ed] >= 0]
+        if model_config == 'nn':
+            inputs += [self.container['pairwise_fea']]
         inputs += [self.container['prev_inst'],
                    self.container['cluster'],
                    self.container['current_hv'],
@@ -572,7 +585,6 @@ class MainModel(object):
                    self.container['prev_inst_cluster'],
                    self.container['anchor_position'],
                    self.container['prev_inst_cluster_gold'],
-                   self.container['antecedents'],
                    self.container['alpha']]
 
         # return theano.function(inputs, outputs=cost, on_unused_input='ignore')
@@ -586,91 +598,55 @@ class MainModel(object):
                                                                      gradients,
                                                                      self.container['lr'],
                                                                      self.args['norm_lim'])
+        return f_grad_shared, f_update_param
 
-        # f_detail = theano.function(inputs, outputs=cost_all, on_unused_input='ignore')
+    def get_latent(self, score):
+        padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
+        # padded = T.concatenate([score, T.alloc(0., self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
+        row_indices = np.array([[i] * self.args['max_inst_in_doc']
+                                for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
+        ante_score = padded[row_indices, self.container['prev_inst_cluster_gold']]
+        latent_score = T.max(ante_score, axis=1)
+        latent_score = T.set_subtensor(latent_score[T.nonzero(T.eq(latent_score, -np.inf))], 0.)
 
-        return f_grad_shared, f_update_param #, f_detail
+        latent_inst = T.argmax(ante_score, axis=1)
+        row_indices = T.arange(self.args['batch'] * self.args['max_inst_in_doc'], dtype='int32')
+        alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], 0.)
 
-    def get_local_score_nn(self, rep_cnn, dim_cnn):
+        return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha, latent_inst
+
+    def get_pairwise_rep(self, rep_cnn, dim_cnn):
         indices_pair = np.array([[i, (i - i % self.args['max_inst_in_doc']) + j]
                                  for i in range(self.args['max_inst_in_doc'] * self.args['batch'])
                                  for j in range(i % self.args['max_inst_in_doc'])], dtype='int32')
-        rep_pair = T.reshape(rep_cnn[indices_pair], newshape=(indices_pair.shape[0], 2 * dim_cnn))
-        rep_pair = T.concatenate([rep_pair, self.container['pairwise_fea']], axis=1)
-        dim_pair = 2 * dim_cnn + self.args['features_dim']['pairwise_fea']
+        rep_inter = T.reshape(rep_cnn[indices_pair], newshape=(indices_pair.shape[0], 2 * dim_cnn))
+        rep_inter = T.concatenate([rep_inter, self.container['pairwise_fea']], axis=1)
+        dim_inter = 2 * dim_cnn + self.args['features_dim']['pairwise_fea']
 
-        dim_hids = [dim_pair] + self.args['multilayer_nn_pair']
+        dim_hids = [dim_inter] + self.args['multilayer_nn_pair']
+        rep_pairwise = multi_hidden_layers([rep_inter],
+                                           dim_hids,
+                                           self.container['params_local'],
+                                           self.container['names_local'],
+                                           'main_multi_nn_pair',
+                                           self.args['kGivens'])[0]
+        dim_pairwise = dim_hids[-1]
+        return rep_pairwise, dim_pairwise
 
-        rep_inter = multi_hidden_layers([rep_pair],
-                                        dim_hids,
-                                        self.container['params_local'],
-                                        self.container['names_local'],
-                                        'main_multi_nn_pair',
-                                        self.args['kGivens'])[0]
-        dim_inter = dim_hids[-1]
-
-        fW = create_shared(np.random.uniform(low=-1.0, high=1.0, size=(dim_inter, 2)).astype(theano.config.floatX),
-                           self.args['kGivens'],
-                           'ffnn_W')
-        fb = create_shared(np.array([0., 0.], dtype=theano.config.floatX), self.args['kGivens'], 'ffnn_b')
-        self.container['params_local'] += [fW, fb]
-        self.container['names_local'] += ['ffnn_W', 'ffnn_b']
-
-        if self.args['dropout'] > 0.:
-            score = T.nnet.softmax(T.dot(rep_inter, (1.0 - self.args['dropout']) * fW) + fb)
-        else:
-            score = T.nnet.softmax(T.dot(rep_inter, fW) + fb)
-
+    def get_pairwise_score_nn(self, rep_pairwise, dim_pairwise):
+        res, _ = hidden_layer(inputs=[rep_pairwise],
+                                dim_in=dim_pairwise,
+                                dim_out=2,
+                                params=self.container['params_local'],
+                                names=self.container['names_local'],
+                                prefix='ffnn',
+                                kGivens=self.args['kGivens'],
+                                dropout=self.args['dropout'])
         # return T.tanh(score + pairwise_score + b)
         # return T.nnet.nnet.sigmoid(score + pairwise_score + b)
-        return score
+        return res[0]
 
-    # def get_local_score_nn(self, rep_cnn, dim_cnn):
-    #     dim_pairwise_fea = self.args['features_dim']['pairwise_fea']
-    #     W_pairwise = create_shared(
-    #         np.random.uniform(low=-1., high=1., size=dim_pairwise_fea).astype(theano.config.floatX),
-    #         self.args['kGivens'],
-    #         'pairwise_W')
-    #     dim_row = self.args['max_inst_in_doc'] * self.args['batch']
-    #     pairwise_score = T.dot(T.reshape(self.container['pairwise_fea'],
-    #                                      newshape=(dim_row * self.args['max_inst_in_doc'], dim_pairwise_fea)),
-    #                            W_pairwise)
-    #     pairwise_score = T.reshape(pairwise_score, newshape=(dim_row, self.args['max_inst_in_doc']))
-    #     self.container['params_local'] += [W_pairwise]
-    #     self.container['names_local'] += ['ffnn_W_pairwise']
-    #
-    #     def _step(suffix):
-    #         W1 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
-    #                            self.args['kGivens'],
-    #                            'ffnn_W0_' + suffix)
-    #         W2 = create_shared(np.random.uniform(low=-1., high=1., size=dim_cnn).astype(theano.config.floatX),
-    #                            self.args['kGivens'],
-    #                            'ffnn_W1_' + suffix)
-    #         b = create_shared(0., self.args['kGivens'], 'ffnn_b_' + suffix)
-    #         self.container['params_local'] += [W1, W2, b]
-    #         self.container['names_local'] += [item + suffix for item in ['ffnn_W0_', 'ffnn_W1_', 'ffnn_b_']]
-    #
-    #         score = T.dot(rep_cnn, W1) + \
-    #                 T.reshape(T.dot(rep_cnn, W2), [self.args['batch'] * self.args['max_inst_in_doc'], 1]) + b
-    #         indices_row = np.array([[i] * self.args['max_inst_in_doc']
-    #                                 for i in range(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
-    #         indices_col = np.concatenate(
-    #             np.array([[[self.args['max_inst_in_doc'] * batch_index + i
-    #                         for i in range(self.args['max_inst_in_doc'])]] * self.args['max_inst_in_doc']
-    #                       for batch_index in range(self.args['batch'])], dtype='int32'))
-    #         # return T.nnet.nnet.sigmoid(score[indices_row, indices_col])
-    #         return T.tanh(score[indices_row, indices_col] + pairwise_score)
-    #     score = T.stack((_step('0'), _step('1')), axis=2)
-    #     score = T.exp(score - T.max(score, axis=2, keepdims=True))
-    #     return score / T.sum(score, axis=2, keepdims=True)
-
-    def build_train_local(self, score):
-        # dim_row = self.args['max_inst_in_doc'] * self.args['batch']
-        #
-        # row_indices = np.array([[i] * self.args['max_inst_in_doc'] for i in range(dim_row)], dtype='int32')
-        # col_indices = np.array([[i for i in range(self.args['max_inst_in_doc'])]] * dim_row, dtype='int32')
-        # cost = -T.mean(T.log(score)[T.arange(self.container['y'].shape[0]), self.container['y']])
-        # cost = -T.sum(T.log(score) * self.container['y'] + T.log(1 - score) * (1 - self.container['y']))
+    def build_train_pair_nn(self, score):
         cost = -T.mean(T.log(score)[T.arange(self.container['y'].shape[0]), self.container['y']])
 
         gradients = T.grad(cost, self.container['params_local'])
@@ -693,22 +669,123 @@ class MainModel(object):
                                                                      self.args['norm_lim'])
         return f_grad_shared, f_update_param
 
-    def get_latent(self, score):
-        padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
-        # padded = T.concatenate([score, T.alloc(0., self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
+    def get_local_score_nn(self, rep_cnn, dim_cnn, rep_pairwise, dim_pairwise):
+        res, _ = hidden_layer(inputs=[rep_pairwise],
+                              dim_in=dim_pairwise,
+                              dim_out=1,
+                              params=self.container['params_local'],
+                              names=self.container['names_local'],
+                              prefix='ffnn_local_ana',
+                              kGivens=self.args['kGivens'],
+                              dropout=self.args['dropout'])
+        score_ana = T.reshape(res[0], newshape=(self.args['batch'] * self.args['max_inst_in_doc'],))
+        res, _ = hidden_layer(inputs=[rep_cnn],
+                              dim_in=dim_cnn,
+                              dim_out=1,
+                              params=self.container['params_local'],
+                              names=self.container['names_local'],
+                              prefix='ffnn_local_nonana',
+                              kGivens=self.args['kGivens'],
+                              dropout=self.args['dropout'])
+        score_nonana = T.reshape(res[0], newshape=(self.args['batch'] * self.args['max_inst_in_doc'],))
+
+        score = T.concatenate([np.array([0.], dtype=theano.config.floatX), score_ana, score_nonana])
+        indices_single = np.array(
+            [[1 + row * (row - 1) / 2 + col for col in range(row)] + [-1] * (self.args['max_inst_in_doc'] - row)
+             for row in np.arange(self.args['max_inst_in_doc'])], dtype='int32')
+        offset = 1 + self.args['max_inst_in_doc'] * (self.args['max_inst_in_doc'] - 1) / 2 * self.args['batch']
+        np.fill_diagonal(indices_single, offset + np.arange(self.args['max_inst_in_doc']))
+        indices = np.concatenate([indices_single + i * self.args['max_inst_in_doc']
+                                  for i in np.arange(self.args['batch'])])
+        mask_single = np.not_equal(indices_single, -1)
+        mask = np.concatenate([mask_single] * self.args['batch'])
+        return score[indices * mask]
+
+    def get_global_score_nn(self, rep_cnn, dim_cnn):
+        padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
+        X = padded[self.container['cluster']]
+        rep_rnn, gru_params = rnn_gru(X,
+                                      dim_cnn,
+                                      dim_cnn,
+                                      self.container['mask_rnn'],
+                                      'main_rnn',
+                                      self.container['params_global'],
+                                      self.container['names_global'],
+                                      self.args['kGivens'])
+
+        rep_rnn = T.concatenate([rep_rnn, T.alloc(0., 1, dim_cnn)])
+        current_hv = rep_rnn[self.container['current_hv']]
+
+        rep_inter1 = T.concatenate([T.sum(current_hv, axis=1, keepdims=True), current_hv], axis=1)
+        rep_inter2 = T.stack([rep_cnn] * (self.args['max_cluster_in_doc'] + 1), axis=1)
+
+        rep_inter = T.concatenate([rep_inter1, rep_inter2], axis=2)
+        dim_inter = dim_cnn + dim_cnn
+
+        res, ffnn_params = hidden_layer(inputs=[rep_inter],
+                                        dim_in=dim_inter,
+                                        dim_out=1,
+                                        params=self.container['params_global'],
+                                        names=self.container['names_global'],
+                                        prefix='ffnn_global',
+                                        kGivens=self.args['kGivens'],
+                                        dropout=self.args['dropout'])
+
+        score_cluster = T.reshape(res[0], newshape=(self.args['batch'] * self.args['max_inst_in_doc'],
+                                                           self.args['max_cluster_in_doc'] + 1))
+        score_cluster = T.concatenate([score_cluster,
+                                       T.alloc(0., self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
         row_indices = np.array([[i] * self.args['max_inst_in_doc']
                                 for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
-        ante_score = padded[row_indices, self.container['prev_inst_cluster_gold']]
-        latent_score = T.max(ante_score, axis=1)
-        latent_score = T.set_subtensor(latent_score[T.nonzero(T.eq(latent_score, -np.inf))], 0.)
+        score = score_cluster[row_indices, self.container['prev_inst_cluster']]
+        return score, gru_params, ffnn_params
 
-        latent_inst = T.argmax(ante_score, axis=1)
-        row_indices = T.arange(self.args['batch'] * self.args['max_inst_in_doc'], dtype='int32')
-        alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], 0.)
+    # def get_global_score_nn(self, rep_cnn, dim_cnn):
+    #     padded = T.concatenate([rep_cnn, T.alloc(0., 1, dim_cnn)])
+    #     X = padded[self.container['cluster']]
+    #     rep_rnn, gru_params = rnn_gru(X,
+    #                                   dim_cnn,
+    #                                   dim_cnn,
+    #                                   self.container['mask_rnn'],
+    #                                   'main_rnn',
+    #                                   self.container['params_global'],
+    #                                   self.container['names_global'],
+    #                                   self.args['kGivens'])
+    #     rep_inter = rep_rnn[self.container['prev_inst_hv']]
+    #
+    #     indices = np.concatenate(
+    #         [np.concatenate([np.array([batch_index * self.args['max_inst_in_doc'] + i] * i, dtype='int32')
+    #                          for i in np.arange(1, self.args['max_inst_in_doc'])])
+    #          for batch_index in np.arange(self.args['batch'])])
+    #     rep_inter = T.concatenate([rep_inter, rep_cnn[indices]], axis=1)
+    #     dim_inter = 2 * dim_cnn
+    #
+    #     dim_hids = [dim_inter] + self.args['multilayer_nn_cluster']
+    #     rep_inter = multi_hidden_layers([rep_inter],
+    #                                     dim_hids,
+    #                                     self.container['params_global'],
+    #                                     self.container['names_global'],
+    #                                     'main_multi_nn_cluster',
+    #                                     self.args['kGivens'])[0]
+    #     dim_inter = dim_hids[-1]
+    #
+    #     fW = create_shared(np.random.uniform(low=-1.0, high=1.0, size=(dim_inter, 2)).astype(theano.config.floatX),
+    #                        self.args['kGivens'],
+    #                        'ffnn_cluster_W')
+    #     fb = create_shared(np.array([0., 0.], dtype=theano.config.floatX), self.args['kGivens'], 'ffnn_cluster_b')
+    #     self.container['params_global'] += [fW, fb]
+    #     self.container['names_global'] += ['ffnn_cluster_W', 'ffnn_cluster_b']
+    #
+    #     if self.args['dropout'] > 0.:
+    #         score = T.nnet.softmax(T.dot(rep_inter, (1.0 - self.args['dropout']) * fW) + fb)
+    #     else:
+    #         score = T.nnet.softmax(T.dot(rep_inter, fW) + fb)
+    #
+    #     # return T.tanh(score + pairwise_score + b)
+    #     # return T.nnet.nnet.sigmoid(score + pairwise_score + b)
+    #     return score, gru_params
 
-        return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha, latent_inst
-
-    def build_predict_combined(self, rep_cnn, dim_cnn, local_score, gru_params):
+    def build_predict_combined_dot(self, rep_cnn, dim_cnn, local_score, gru_params):
         Wc, bc, Uc, Wx, Ux, bx = gru_params
 
         def _slice(_x, n):
@@ -772,7 +849,77 @@ class MainModel(object):
 
         return theano.function(inputs, ret[1][-1], on_unused_input='ignore')
 
-    def build_predict_local(self, score):
+    def build_predict_combined_nn(self, rep_cnn, dim_cnn, local_score, gru_params, ffnn_params):
+        Wc, bc, Uc, Wx, Ux, bx = gru_params
+        W_global, b_global = ffnn_params
+
+        def _slice(_x, n):
+            return _x[:, n * dim_cnn:(n + 1) * dim_cnn]
+
+        def gru_step(x_t, h_tm1):
+            preact = T.nnet.sigmoid(T.dot(h_tm1, Uc) + T.dot(x_t, Wc) + bc)
+
+            r_t = _slice(preact, 0)
+            u_t = _slice(preact, 1)
+
+            h_t = T.tanh(T.dot(h_tm1, Ux) * r_t + T.dot(x_t, Wx) + bx)
+            h_t = u_t * h_tm1 + (1. - u_t) * h_t
+
+            return h_t
+
+        offsets = np.array([i * self.args['max_inst_in_doc'] for i in np.arange(self.args['batch'])], dtype='int32')
+
+        def recurrence(curr_inst, current_hv, prev_inst_cluster, current_cluster):
+            curr_indices = offsets + curr_inst
+            prev_inst_cluster = T.set_subtensor(prev_inst_cluster[:, curr_inst], 0)
+            # prev_inst_cluster[:, curr_inst] = 0
+
+            curr_rep_cnn = rep_cnn[curr_indices]
+
+            rep_inter1 = T.concatenate([T.sum(current_hv, axis=1, keepdims=True), current_hv], axis=1)
+            rep_inter2 = T.stack([curr_rep_cnn] * (self.args['max_inst_in_doc'] + 1), axis=1)
+            rep_inter = T.concatenate([rep_inter1, rep_inter2], axis=2)
+
+            score_cluster = T.nnet.sigmoid(T.dot(rep_inter, W_global) + b_global)
+            score_cluster = T.reshape(score_cluster, newshape=(self.args['batch'], self.args['max_inst_in_doc'] + 1))
+            score_cluster = T.concatenate([score_cluster, T.alloc(-np.inf, self.args['batch'], 1)], axis=1)
+
+            row_indices = np.array([[i] * self.args['max_inst_in_doc']
+                                    for i in np.arange(self.args['batch'])], dtype='int32')
+            global_score = score_cluster[row_indices, prev_inst_cluster]
+            score = local_score[curr_indices] + global_score
+
+            indices_single = T.arange(self.args['batch'], dtype='int32')
+            ante_cluster_raw = prev_inst_cluster[indices_single, T.argmax(score, axis=1)]
+            indices_new_cluster = T.nonzero(T.eq(ante_cluster_raw, 0))
+            ante_cluster = T.set_subtensor(ante_cluster_raw[indices_new_cluster], current_cluster[indices_new_cluster])
+
+            current_cluster = T.set_subtensor(current_cluster[indices_new_cluster], current_cluster[indices_new_cluster]+1)
+            prev_inst_cluster = T.set_subtensor(prev_inst_cluster[:, curr_inst], ante_cluster)
+
+            ante_hv = current_hv[indices_single, ante_cluster-1]
+            current_hv = T.set_subtensor(current_hv[indices_single, ante_cluster-1], gru_step(curr_rep_cnn, ante_hv))
+
+            return current_hv, prev_inst_cluster, current_cluster
+
+        ini_current_hv = np.array([[[0.] * dim_cnn] * self.args['max_inst_in_doc']]
+                                  * self.args['batch']).astype(theano.config.floatX)
+        ini_prev_inst_cluster = np.array([[-1] * self.args['max_inst_in_doc']] * self.args['batch'], dtype='int32')
+        ini_current_cluster = np.array([1] * self.args['batch'], dtype='int32')
+
+        ret, _ = theano.scan(fn=recurrence,
+                             sequences=T.arange(self.args['max_inst_in_doc'], dtype='int32'),
+                             outputs_info=[ini_current_hv, ini_prev_inst_cluster, ini_current_cluster])
+
+        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
+        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
+                   if self.args['features_event'][ed] >= 0]
+        inputs += [self.container['pairwise_fea'],
+                   self.container['prev_inst'],
+                   self.container['anchor_position']]
+        return theano.function(inputs, ret[1][-1], on_unused_input='ignore')
+
+    def build_predict_pairwise_nn(self, score):
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['vars'][ed] for ed in self.args['features_event']
                    if self.args['features_event'][ed] >= 0]
