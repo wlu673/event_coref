@@ -255,9 +255,11 @@ def hidden_layer(inputs, dim_in, dim_out, params, names, prefix, kGivens, dropou
     res = []
     for x in inputs:
         if dropout > 0.:
-            out = T.nnet.sigmoid(T.dot(x, (1.0 - dropout) * W) + b)
+            out = T.nnet.relu(T.dot(x, (1.0 - dropout) * W) + b)
+            # out = T.nnet.sigmoid(T.dot(x, (1.0 - dropout) * W) + b)
         else:
-            out = T.nnet.sigmoid(T.dot(x, W) + b)
+            out = T.nnet.relu(T.dot(x, W) + b)
+            # out = T.nnet.sigmoid(T.dot(x, W) + b)
         res += [out]
 
     params += [W, b]
@@ -678,7 +680,8 @@ class MainModel(object):
                               prefix='ffnn_local_ana',
                               kGivens=self.args['kGivens'],
                               dropout=self.args['dropout'])
-        score_ana = T.reshape(res[0], newshape=(self.args['batch'] * self.args['max_inst_in_doc'],))
+        num_pairs = self.args['max_inst_in_doc'] * (self.args['max_inst_in_doc'] - 1) / 2
+        score_ana = T.reshape(res[0], newshape=(self.args['batch'] * num_pairs,))
         res, _ = hidden_layer(inputs=[rep_cnn],
                               dim_in=dim_cnn,
                               dim_out=1,
@@ -914,8 +917,8 @@ class MainModel(object):
         inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
         inputs += [self.container['vars'][ed] for ed in self.args['features_event']
                    if self.args['features_event'][ed] >= 0]
-        inputs += [self.container['pairwise_fea'],
-                   self.container['prev_inst'],
+        inputs += [self.container['prev_inst'],
+                   self.container['pairwise_fea'],
                    self.container['anchor_position']]
         return theano.function(inputs, ret[1][-1], on_unused_input='ignore')
 

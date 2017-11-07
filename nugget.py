@@ -109,21 +109,21 @@ def prepare_data(max_lengths, corpora, prefix, map_fea_to_index, features, featu
             for i in range(num_placeholder):
                 add_instance_placeholder(data_doc, features, features_event, map_fea_to_index, map_dim_bin, window)
 
-            # prev_inst = [0] + [-1] * (max_lengths['instance'] - 1)
-            # mask_prev_inst = [0] * max_lengths['instance']
-            # for i in range(1, len(inst_in_doc)):
-            #     data_doc['prev_inst'] += [prev_inst[:]]
-            #     data_doc['mask_prev_inst'] += [mask_prev_inst[:]]
-            #     prev_inst[i - 1] = i
-            #     prev_inst[i] = 0
-            #     mask_prev_inst[i - 1] = 1
-            # data_doc['prev_inst'] += [prev_inst[:]] + [[-1] * max_lengths['instance']] * num_placeholder
-            # data_doc['mask_prev_inst'] += [mask_prev_inst[:]] + [[0] * max_lengths['instance']] * num_placeholder
-            #
-            # data_doc['prev_inst'] = np.array(data_doc['prev_inst'], dtype='int32')
-            # data_doc['mask_prev_inst'] = np.array(data_doc['mask_prev_inst'], dtype='int32')
-            #
-            # process_cluster(data_doc, max_lengths, doc['coreference'], len(inst_in_doc), num_placeholder, alphas)
+            prev_inst = [0] + [-1] * (max_lengths['instance'] - 1)
+            mask_prev_inst = [0] * max_lengths['instance']
+            for i in range(1, len(inst_in_doc)):
+                data_doc['prev_inst'] += [prev_inst[:]]
+                data_doc['mask_prev_inst'] += [mask_prev_inst[:]]
+                prev_inst[i - 1] = i
+                prev_inst[i] = 0
+                mask_prev_inst[i - 1] = 1
+            data_doc['prev_inst'] += [prev_inst[:]] + [[-1] * max_lengths['instance']] * num_placeholder
+            data_doc['mask_prev_inst'] += [mask_prev_inst[:]] + [[0] * max_lengths['instance']] * num_placeholder
+
+            data_doc['prev_inst'] = np.array(data_doc['prev_inst'], dtype='int32')
+            data_doc['mask_prev_inst'] = np.array(data_doc['mask_prev_inst'], dtype='int32')
+
+            process_cluster(data_doc, max_lengths, doc['coreference'], len(inst_in_doc), num_placeholder, alphas)
 
             data_doc['doc_id'] = doc_id
             data_doc['inst_id_to_index'] = doc['inst_id_to_index']
@@ -401,7 +401,7 @@ def fit_data_to_batch(data, batch):
 
 def get_batch_inputs(data, features, features_event, batch, max_inst_in_doc):
     features_batch, inputs_batch = defaultdict(list), defaultdict(list)
-    placeholder = np.zeros(shape=(max_inst_in_doc, max_inst_in_doc), dtype='int32')
+    # placeholder = np.zeros(shape=(max_inst_in_doc, max_inst_in_doc), dtype='int32')
     for i, doc in enumerate(data):
         for fea in features:
             features_batch[fea] += doc[fea]
@@ -436,8 +436,8 @@ def get_train_inputs(data, features, features_event, batch, max_inst_in_doc, mod
             inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
 
     prev_inst = np.concatenate(inputs_batch['prev_inst'])
-    if 'global' in model_config:
-        inputs += [prev_inst]
+    if 'combined' in model_config:
+        inputs += [np.concatenate(inputs_batch['pairwise_fea']), prev_inst]
         for item in ['cluster', 'current_hv']:
             inputs += [np.concatenate(inputs_batch[item])]
         inputs += [np.array(inputs_batch['mask_rnn'], dtype=theano.config.floatX)]
@@ -469,10 +469,10 @@ def get_pred_inputs(data, features, features_event, batch, max_inst_in_doc, mode
             inputs += [np.array(features_batch[fea], dtype='int32')]
         elif features_event[fea] == 1:
             inputs += [np.array(features_batch[fea]).astype(theano.config.floatX)]
-    if 'global' in model_config:
+    if 'combined' in model_config:
         inputs += [np.concatenate(inputs_batch['prev_inst'])]
-    inputs += [np.array(inputs_batch['anchor_position'], dtype='int32'),
-               np.concatenate(inputs_batch['pairwise_fea'])]
+    inputs += [np.concatenate(inputs_batch['pairwise_fea']),
+               np.array(inputs_batch['anchor_position'], dtype='int32')]
 
     return inputs
 
@@ -510,15 +510,15 @@ def predict(model, data, features, features_event, batch, max_inst_in_doc, model
                                       batch,
                                       max_inst_in_doc,
                                       model_config)
-        if 'global' in model_config:
-            predict_global(model, data, batch, batch_index, inputs_pred, predictions)
+        if 'combined' in model_config:
+            predict_combined(model, data, batch, batch_index, inputs_pred, predictions)
         else:
             predict_local(model, data, batch, batch_index, max_inst_in_doc, inputs_pred, predictions)
 
     return predictions
 
 
-def predict_global(model, data, batch, batch_index, inputs_pred, predictions):
+def predict_combined(model, data, batch, batch_index, inputs_pred, predictions):
     cluster_batch = model.predict(*inputs_pred)
     for doc_index in range(batch):
         doc = data[batch_index * batch + doc_index]
@@ -708,15 +708,15 @@ def print_perf(performance, msg):
     print '-' * 80
 
 
-def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
-        path_realis='/scratch/wl1191/event_coref/data/realis/',
+def run(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
+        path_realis='/scratch/wl1191/event_coref/data/sample/realis/',
         path_golden='/scratch/wl1191/event_coref/officialScorer/hopper/eval.tbf',
         path_token='/scratch/wl1191/event_coref/officialScorer/hopper/tkn/',
         path_scorer='/scratch/wl1191/event_coref/officialScorer/scorer_v1.7.py',
-        path_conllTemp='/scratch/wl1191/event_coref/data/coref/conllTempFile_Coreference.txt',
-        path_out='/scratch/wl1191/event_coref/out/',
-        path_kGivens='/scratch/wl1191/event_coref/params49.pkl',
-        model_config='local',
+        path_conllTemp='/scratch/wl1191/event_coref/data/sample/coref/conllTempFile_Coreference.txt',
+        path_out='/scratch/wl1191/event_coref/data/sample/out/',
+        path_kGivens='/scratch/wl1191/event_coref/data/sample/params.pkl', # '/scratch/wl1191/event_coref/params49.pkl',
+        model_config='combined',
         window=31,
         wed_window=2,
         expected_features=OrderedDict([('anchor', 0),
@@ -731,17 +731,17 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
         pipeline=False,
         with_word_embs=True,
         update_embs=True,
-        cnn_filter_num=300,
-        cnn_filter_wins=[2, 3, 4, 5],
-        dropout=0.5,
-        multilayer_nn_cnn=[600, 300],
-        multilayer_nn_pair=[600, 300],
+        cnn_filter_num=40, # 300,
+        cnn_filter_wins=[2, 3], # [2, 3, 4, 5],
+        dropout=0.5, # 0.5,
+        multilayer_nn_cnn=[80, 40], # [600, 300],
+        multilayer_nn_pair=[80, 40], # [600, 300],
         optimizer='adadelta',
         lr=0.05,
         lr_decay=False,
         norm_lim=0,
         alphas=(0.5, 1.2, 1),
-        batch=2,
+        batch=3, # 2,
         nepochs=300,
         seed=3435,
         verbose=True):
@@ -822,75 +822,74 @@ def run(path_dataset='/scratch/wl1191/event_coref/data/nugget.pkl',
     #                                 model_config)
     #
     # print model.train(*inputs_train)
-    #
+
     # print train(model, data_train, params, 0, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
     # predictions = predict(model, data_train, features, features_event, batch, max_lengths['instance'], model_config)
     # print predictions
 
-    # for i in range(1000):
-    #     if train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose) == 0.:
-    #         break
+    for i in range(1000):
+        train(model, data_train, params, i, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
+
+    print 'Saving parameters ...'
+    model.save(path_out + 'params' + '.pkl')
+
+    print '\nTesting ...'
+    data, num_added = fit_data_to_batch(data_sets['valid'], batch)
+    # preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
+    predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+    # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
+    if num_added > 0:
+        predictions = predictions[:-num_added]
+    print 'Writing out ...'
+    write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
+
+    # # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
+    # #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
+    # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
+    # predictions = OrderedDict()
+    # best_f1 = -np.inf
+    # best_performance = None
+    # best_epoch = -1
+    # curr_lr = lr
+    # print '\nTraining ...\n'
+    # for epoch in xrange(50, 50 + nepochs):
+    #     train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
     #
-    # print 'Saving parameters ...'
-    # model.save(path_out + 'params' + '.pkl')
+    #     if (epoch + 1) % 5 == 0:
+    #     # if epoch >= 0:
+    #         print (' Evaluating in epoch %d ' % epoch).center(80, '-')
+    #         for data_eval in data_sets_eval:
+    #             data, num_added = data_sets_eval[data_eval]
+    #             predictions[data_eval] = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
+    #             if num_added > 0:
+    #                 predictions[data_eval] = predictions[data_eval][:-num_added]
+    #             write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
     #
-    # print '\nTesting ...'
-    # data, num_added = fit_data_to_batch(data_sets['valid'], batch)
-    # # preds = cPickle.load(open(path_out + 'predictions.pkl', 'r'))
-    # predictions = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
-    # # predictions = predict(preds, data, features, features_event, batch, max_lengths['instance'], model_config)
-    # if num_added > 0:
-    #     predictions = predictions[:-num_added]
-    # print 'Writing out ...'
-    # write_out(0, 'valid', data, predictions, realis_outputs['valid'], path_out)
-
-    # data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch)),
-    #                               ('test', fit_data_to_batch(data_sets['test'], batch))])
-    data_sets_eval = OrderedDict([('valid', fit_data_to_batch(data_sets['valid'], batch))])
-    predictions = OrderedDict()
-    best_f1 = -np.inf
-    best_performance = None
-    best_epoch = -1
-    curr_lr = lr
-    print '\nTraining ...\n'
-    for epoch in xrange(50, 50 + nepochs):
-        train(model, data_train, params, epoch, features, features_event, batch, num_batch, max_lengths['instance'], model_config, verbose)
-
-        if (epoch + 1) % 5 == 0:
-        # if epoch >= 0:
-            print (' Evaluating in epoch %d ' % epoch).center(80, '-')
-            for data_eval in data_sets_eval:
-                data, num_added = data_sets_eval[data_eval]
-                predictions[data_eval] = predict(model, data, features, features_event, batch, max_lengths['instance'], model_config)
-                if num_added > 0:
-                    predictions[data_eval] = predictions[data_eval][:-num_added]
-                write_out(epoch, data_eval, data, predictions[data_eval], realis_outputs[data_eval], path_out)
-
-            path_output = path_out + 'valid.coref.pred' + str(epoch)
-            performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
-
-            print 'Saving parameters'
-            model.save(path_out + 'params' + str(epoch) + '.pkl')
-
-            if performance['averageCoref'] > best_f1:
-                best_f1 = performance['averageCoref']
-                best_performance = performance
-                best_epoch = epoch
-                print 'NEW BEST: Epoch', epoch
-            if verbose:
-                print_perf(performance, 'Current Performance')
-
-            # learning rate decay if no improvement in 10 epochs
-            if lr_decay and abs(best_epoch - epoch) >= 10:
-                curr_lr *= 0.5
-            if curr_lr < 1e-5:
-                break
-
-        sys.stdout.flush()
-
-    print '\n', '=' * 80, '\n'
-    print 'BEST RESULT: Epoch', best_epoch
-    print_perf(best_performance, 'Best Performance')
+    #         path_output = path_out + 'valid.coref.pred' + str(epoch)
+    #         performance = get_score(path_golden, path_output, path_scorer, path_token, path_conllTemp)
+    #
+    #         print 'Saving parameters'
+    #         model.save(path_out + 'params' + str(epoch) + '.pkl')
+    #
+    #         if performance['averageCoref'] > best_f1:
+    #             best_f1 = performance['averageCoref']
+    #             best_performance = performance
+    #             best_epoch = epoch
+    #             print 'NEW BEST: Epoch', epoch
+    #         if verbose:
+    #             print_perf(performance, 'Current Performance')
+    #
+    #         # learning rate decay if no improvement in 10 epochs
+    #         if lr_decay and abs(best_epoch - epoch) >= 10:
+    #             curr_lr *= 0.5
+    #         if curr_lr < 1e-5:
+    #             break
+    #
+    #     sys.stdout.flush()
+    #
+    # print '\n', '=' * 80, '\n'
+    # print 'BEST RESULT: Epoch', best_epoch
+    # print_perf(best_performance, 'Best Performance')
 
 
 if __name__ == '__main__':
