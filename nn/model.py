@@ -99,7 +99,7 @@ def get_concatenation(embeddings, variables, features, dim_num=3, transpose=Fals
                 reps += [embeddings[fea][v]]
             else:
                 reps += [embeddings[fea][v.T]] if dim_num == 3 else [embeddings[fea][v].dimshuffle(1, 0)]
-        elif features[fea] == 1:
+        else:
             if not transpose:
                 reps += [variables[fea]]
             else:
@@ -386,14 +386,11 @@ class MainModel(object):
         if 'combined' in self.args['model_config']:
             local_score = self.get_local_score_nn(rep_cnn, dim_cnn, rep_pairwise, dim_pairwise)
             global_score, gru_params, ffnn_params = self.get_global_score_nn(rep_cnn, dim_cnn)
-            # self.train = self.build_train_combined(local_score, global_score, 'nn')
-            self.f_grad_shared, self.f_update_param = self.build_train_combined(local_score, global_score, 'nn')
+            # self.f_grad_shared = self.build_train_combined(local_score, global_score)
+            self.f_grad_shared, self.f_update_param = self.build_train_combined(local_score, global_score)
             self.predict = self.build_predict_combined_nn(rep_cnn, dim_cnn, local_score, gru_params, ffnn_params)
         else:
             score = self.get_pairwise_score_nn(rep_pairwise, dim_pairwise)
-            # self.train = self.get_local_score_nn(rep_cnn, dim_cnn)
-            # self.train = theano.function(inputs, outputs=score, on_unused_input='ignore')
-            # self.train = self.build_train_local(score)
             self.f_grad_shared, self.f_update_param = self.build_train_pair_nn(score)
             self.predict = self.build_predict_pairwise_nn(score)
 
@@ -439,36 +436,12 @@ class MainModel(object):
                     self.container['params_local'] += [self.container['embeddings'][fea]]
                     self.container['names_local'] += [fea]
 
-            if self.args['features'][fea] >= 0:
-                dim_added = self.args['features_dim'][fea]
-                self.container['fea_dim'] += dim_added
-                self.container['vars'][fea] = T.imatrix() if self.args['features'][fea] == 0 else T.tensor3()
-                print 'Using feature \'%s\' with dimension %d' % (fea, dim_added)
+            dim_added = self.args['features_dim'][fea]
+            self.container['fea_dim'] += dim_added
+            self.container['vars'][fea] = T.imatrix() if self.args['features'][fea] == 0 else T.tensor3()
+            print 'Using feature \'%s\' with dimension %d' % (fea, dim_added)
 
         print 'Total feature dimension:', self.container['fea_dim']
-
-        print ' Event Features '.center(header_width, '-')
-        self.container['fea_event_dim'] = 0
-        if len(self.args['features_event']) > 0:
-            for fea in self.args['features_event']:
-                if self.args['features_event'][fea] == 0:
-                    self.container['embeddings'][fea] = create_shared(
-                        self.args['embeddings'][fea].astype(theano.config.floatX),
-                        self.args['kGivens'],
-                        fea)
-
-                    if self.args['update_embs']:
-                        self.container['params_local'] += [self.container['embeddings'][fea]]
-                        self.container['names_local'] += [fea]
-
-                if self.args['features_event'][fea] >= 0:
-                    dim_added = self.args['features_dim'][fea]
-                    self.container['fea_event_dim'] += dim_added
-                    self.container['vars'][fea] = T.ivector() if self.args['features_event'][fea] == 0 else T.matrix()
-                    print 'Using event feature \'%s\' with dimension %d' % (fea, dim_added)
-        else:
-            print 'No event features used'
-
         print '-' * header_width
 
     def define_vars(self):
@@ -478,11 +451,10 @@ class MainModel(object):
         self.container['prev_inst_hv'] = T.ivector('prev_inst_hv')
         self.container['prev_inst'] = T.imatrix('prev_inst')
         self.container['prev_inst_cluster'] = T.imatrix('prev_inst_cluster')
-        self.container['prev_inst_cluster_gold'] = T.imatrix('prev_inst_cluster_gold')
-        self.container['alpha'] = T.matrix('alpha')
         self.container['anchor_position'] = T.ivector('anchor_position')
         self.container['pairwise_fea'] = T.matrix('pairwise_fea')
-        self.container['y'] = T.ivector('y')
+        self.container['pairwise_coref'] = T.ivector('pairwise_coref')
+        self.container['prev_inst_coref'] = T.imatrix('prev_inst_coref')
         self.container['lr'] = T.scalar('lr')
         self.container['zero_vector'] = T.vector('zero_vector')
 
@@ -496,15 +468,6 @@ class MainModel(object):
 
         if self.args['dropout'] > 0.:
             rep_inter = dropout_from_layer(self.args['rng'], [rep_inter], self.args['dropout'])[0]
-
-        if len(self.args['features_event']) > 0:
-            rep_event = get_concatenation(self.container['embeddings'],
-                                          self.container['vars'],
-                                          self.args['features_event'],
-                                          dim_num=2,
-                                          transpose=False)
-            rep_inter = T.concatenate([rep_inter, rep_event], axis=1)
-            dim_inter += self.container['fea_event_dim']
 
         dim_hids = [dim_inter] + self.args['multilayer_nn_cnn']
 
@@ -550,17 +513,15 @@ class MainModel(object):
         return res[0]
 
     def build_train_pair_nn(self, score):
-        cost = -T.mean(T.log(score)[T.arange(self.container['y'].shape[0]), self.container['y']])
+        cost = -T.mean(T.log(score)[T.arange(self.container['pairwise_coref'].shape[0]), self.container['pairwise_coref']])
 
         gradients = T.grad(cost, self.container['params_local'])
         # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
 
-        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
-                   if self.args['features_event'][ed] >= 0]
+        inputs = [self.container['vars'][ed] for ed in self.args['features']]
         inputs += [self.container['anchor_position'],
                    self.container['pairwise_fea'],
-                   self.container['y']]
+                   self.container['pairwise_coref']]
 
         # return theano.function(inputs, cost, on_unused_input='ignore')
         f_grad_shared, f_update_param = eval(self.args['optimizer'])(inputs,
@@ -644,20 +605,27 @@ class MainModel(object):
         score = score_cluster[row_indices, self.container['prev_inst_cluster']]
         return score, gru_params, ffnn_params
 
-    def build_train_combined(self, local_score, global_score, model_config):
-        total_score = local_score + global_score
-        latent_score, alpha, latent_inst = self.get_latent(total_score)
-        cost = T.sum(T.max(alpha * (1 + total_score - latent_score), axis=1))
+    def build_train_combined(self, local_score, global_score):
+        score = local_score + global_score
+        ante_score, ante = T.max_and_argmax(score, axis=1)
+        score_gold = score * self.container['prev_inst_coref']
+        ante_score_gold, ante_gold = T.max_and_argmax(score_gold, axis=1)
+        cost = T.mean((1. + ante_score - ante_score_gold) * T.neq(ante, ante_gold))
+
+        # total_score = total_score / T.sum(total_score, axis=1, keepdims=True)
+        # total_score = T.nnet.softmax(local_score + global_score)
+
+        # ante = T.argmax(total_score, axis=1)
+        # row_indices = T.arange(self.args['batch'] * self.args['max_inst_in_doc'], dtype='int32')
+        # ante_prob = total_score[row_indices, ante]
+        # y = self.container['prev_inst_coref'][row_indices, ante]
+        # cost = T.nnet.binary_crossentropy(ante_prob, y).mean()
 
         params_all = self.container['params_local'] + self.container['params_global']
         names_all = self.container['names_local'] + self.container['names_global']
-
         gradients = T.grad(cost, params_all)
-        # updates = [(p, p - (self.container['lr'] * g)) for p, g in zip(self.container['params'], gradients)]
 
-        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
-                   if self.args['features_event'][ed] >= 0]
+        inputs = [self.container['vars'][ed] for ed in self.args['features']]
         inputs += [self.container['pairwise_fea'],
                    self.container['prev_inst'],
                    self.container['cluster'],
@@ -665,10 +633,8 @@ class MainModel(object):
                    self.container['mask_rnn'],
                    self.container['prev_inst_cluster'],
                    self.container['anchor_position'],
-                   self.container['prev_inst_cluster_gold'],
-                   self.container['alpha']]
+                   self.container['prev_inst_coref']]
 
-        # return theano.function(inputs, outputs=cost, on_unused_input='ignore')
         # return theano.function(inputs, outputs=[latent_inst, alpha], on_unused_input='warn')
         # return theano.function(inputs, gradients, on_unused_input='warn')
 
@@ -681,25 +647,8 @@ class MainModel(object):
                                                                      self.args['norm_lim'])
         return f_grad_shared, f_update_param
 
-    def get_latent(self, score):
-        padded = T.concatenate([score, T.alloc(-np.inf, self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
-        # padded = T.concatenate([score, T.alloc(0., self.args['batch'] * self.args['max_inst_in_doc'], 1)], axis=1)
-        row_indices = np.array([[i] * self.args['max_inst_in_doc']
-                                for i in np.arange(self.args['batch'] * self.args['max_inst_in_doc'])], dtype='int32')
-        ante_score = padded[row_indices, self.container['prev_inst_cluster_gold']]
-        latent_score = T.max(ante_score, axis=1)
-        latent_score = T.set_subtensor(latent_score[T.nonzero(T.eq(latent_score, -np.inf))], 0.)
-
-        latent_inst = T.argmax(ante_score, axis=1)
-        row_indices = T.arange(self.args['batch'] * self.args['max_inst_in_doc'], dtype='int32')
-        alpha = T.set_subtensor(self.container['alpha'][row_indices, latent_inst], 0.)
-
-        return T.reshape(latent_score, [self.args['batch'] * self.args['max_inst_in_doc'], 1]), alpha, latent_inst
-
     def build_predict_pairwise_nn(self, score):
-        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
-                   if self.args['features_event'][ed] >= 0]
+        inputs = [self.container['vars'][ed] for ed in self.args['features']]
         inputs += [self.container['anchor_position'],
                    self.container['pairwise_fea']]
         return theano.function(inputs, T.argmax(score, axis=1), on_unused_input='ignore')
@@ -767,9 +716,7 @@ class MainModel(object):
                              sequences=T.arange(self.args['max_inst_in_doc'], dtype='int32'),
                              outputs_info=[ini_current_hv, ini_prev_inst_cluster, ini_current_cluster])
 
-        inputs = [self.container['vars'][ed] for ed in self.args['features'] if self.args['features'][ed] >= 0]
-        inputs += [self.container['vars'][ed] for ed in self.args['features_event']
-                   if self.args['features_event'][ed] >= 0]
+        inputs = [self.container['vars'][ed] for ed in self.args['features']]
         inputs += [self.container['prev_inst'],
                    self.container['pairwise_fea'],
                    self.container['anchor_position']]

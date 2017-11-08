@@ -46,6 +46,7 @@ def prepare_data(corpora, prefix, map_fea_to_index, features, features_dim, max_
     data_sets = {}
     map_sent_dist_index = {}
     for corpus in corpora:
+        print '\nProcessing', corpus, 'data ...'
         data_sets[corpus] = prepare_data_in_corpus(corpus,
                                                    corpora[corpus],
                                                    prefix,
@@ -54,24 +55,7 @@ def prepare_data(corpora, prefix, map_fea_to_index, features, features_dim, max_
                                                    features_dim,
                                                    max_lengths,
                                                    map_sent_dist_index)
-
-    dim_pairwise_fea = len(map_sent_dist_index) + 3
-    dim_row = max_lengths['instance'] * (max_lengths['instance'] - 1) / 2
-    for corpus in data_sets:
-        for data_doc in data_sets[corpus]:
-            pairwise_fea = data_doc['pairwise_fea']
-            data_doc['pairwise_fea'] = np.zeros((dim_row, dim_pairwise_fea), dtype=theano.config.floatX)
-            num_inst = len(data_doc['inst_id_to_index'])
-            index = 0
-            for i in range(num_inst):
-                for j in range(i):
-                    sent_dist = pairwise_fea[index, 3]
-                    sent_dist_vector = np.array([0] * len(map_sent_dist_index), dtype='int32')
-                    sent_dist_vector[map_sent_dist_index[sent_dist]] = 1
-                    data_doc['pairwise_fea'][index] = np.concatenate([pairwise_fea[index][:3], sent_dist_vector])
-                    index += 1
-    features_dim['pairwise_fea'] = dim_pairwise_fea
-
+    process_pairwise_fea(data_sets, features_dim, max_lengths, map_sent_dist_index)
     return data_sets
 
 
@@ -89,11 +73,11 @@ def prepare_data_in_corpus(corpus_name, corpus_, prefix, map_fea_to_index, featu
         data_doc['missing_inst'] = doc['missing_inst']
 
         process_instance_in_doc(corpus_name, doc, data_doc, map_fea_to_index, features, features_dim, max_lengths)
-
-        data_doc['pairwise_fea'], data_doc['y'] = process_pairs(doc['instances'],
-                                                                doc['coreference'],
-                                                                map_sent_dist_index,
-                                                                max_lengths['instance'])
+        generate_inputs(doc, data_doc, max_lengths)
+        data_doc['pairwise_fea'], data_doc['pairwise_coref'] = process_pairs(doc['instances'],
+                                                                             doc['coreference'],
+                                                                             map_sent_dist_index,
+                                                                             max_lengths['instance'])
 
         process_cluster(data_doc, max_lengths, doc['coreference'], len(doc['instances']))
 
@@ -280,7 +264,7 @@ def process_cluster(data_doc, max_lengths, coref, num_inst):
 
     data_doc['prev_inst_cluster_gold'] = np.array([[-1] * max_lengths['instance']] * max_lengths['instance'],
                                                   dtype='int32')
-    data_doc['prev_inst_coref'] = np.zeros(max_lengths['instance'] * max_lengths['instance'], dtype='int32')
+    data_doc['prev_inst_coref'] = np.zeros((max_lengths['instance'], max_lengths['instance']), dtype='int32')
 
     for inst_curr in range(num_inst):
         chain = coref[map_inst_to_cluster[inst_curr]]
@@ -305,6 +289,25 @@ def process_cluster(data_doc, max_lengths, coref, num_inst):
         data_doc[item] = np.array(data_doc[item], dtype='int32')
 
 
+def process_pairwise_fea(data_sets, features_dim, max_lengths, map_sent_dist_index):
+    dim_pairwise_fea = len(map_sent_dist_index) + 3
+    dim_row = max_lengths['instance'] * (max_lengths['instance'] - 1) / 2
+    for corpus in data_sets:
+        for data_doc in data_sets[corpus]:
+            pairwise_fea = data_doc['pairwise_fea']
+            data_doc['pairwise_fea'] = np.zeros((dim_row, dim_pairwise_fea), dtype=theano.config.floatX)
+            num_inst = len(data_doc['inst_id_to_index'])
+            index = 0
+            for i in range(num_inst):
+                for j in range(i):
+                    sent_dist = pairwise_fea[index, 3]
+                    sent_dist_vector = np.array([0] * len(map_sent_dist_index), dtype='int32')
+                    sent_dist_vector[map_sent_dist_index[sent_dist]] = 1
+                    data_doc['pairwise_fea'][index] = np.concatenate([pairwise_fea[index][:3], sent_dist_vector])
+                    index += 1
+    features_dim['pairwise_fea'] = dim_pairwise_fea
+
+
 def main(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
          expected_features=OrderedDict([('anchor', 0),
                                        ('pos', -1),
@@ -319,12 +322,17 @@ def main(path_dataset='/scratch/wl1191/event_coref/data/sample/nugget.pkl',
          path_out='/scratch/wl1191/event_coref/data/sample/'):
     print '\nLoading dataset:', path_dataset, '...\n'
     max_lengths, corpora, embeddings, map_fea_to_index = cPickle.load(open(path_dataset, 'rb'))
-
     prepare_word_embeddings(use_pretrained_emb, embeddings)
     features, features_dim = prepare_features(expected_features, embeddings, map_fea_to_index)
+
     prefix = 'pipe_' if pipeline else 'gold_'
+    for item in ['instance', 'cluster']:
+        max_lengths[item] = max_lengths[prefix + item]
+        del max_lengths['gold_' + item]
+        del max_lengths['pipe_' + item]
+
     data_sets = prepare_data(corpora, prefix, map_fea_to_index, features, features_dim, max_lengths)
-    cPickle.dump(data_sets, open(path_out + 'data_sets.pkl', 'w'))
+    cPickle.dump([data_sets, features, features_dim, embeddings, max_lengths], open(path_out + 'data.pkl', 'w'))
 
 
 if __name__ == '__main__':
