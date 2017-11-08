@@ -255,11 +255,9 @@ def hidden_layer(inputs, dim_in, dim_out, params, names, prefix, kGivens, dropou
     res = []
     for x in inputs:
         if dropout > 0.:
-            out = T.nnet.relu(T.dot(x, (1.0 - dropout) * W) + b)
-            # out = T.nnet.sigmoid(T.dot(x, (1.0 - dropout) * W) + b)
+            out = T.nnet.sigmoid(T.dot(x, (1.0 - dropout) * W) + b)
         else:
-            out = T.nnet.relu(T.dot(x, W) + b)
-            # out = T.nnet.sigmoid(T.dot(x, W) + b)
+            out = T.nnet.sigmoid(T.dot(x, W) + b)
         res += [out]
 
     params += [W, b]
@@ -422,7 +420,7 @@ class MainModel(object):
         storer = dict()
         params_all = self.container['params_local']
         names_all = self.container['names_local']
-        if 'global' in self.args['model_config']:
+        if 'combined' in self.args['model_config']:
             params_all += self.container['params_global']
             names_all += self.container['names_global']
         for param, name in zip(params_all, names_all):

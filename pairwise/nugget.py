@@ -63,14 +63,14 @@ def prepare_data(corpora, prefix, map_fea_to_index, features, features_dim):
             for item in ['instances', 'coreference', 'inst_id_to_index', 'missing_inst']:
                 doc[item] = corpora[corpus][doc_id][prefix + item]
             if len(doc['instances']) == 0:
-                pass
+                continue
 
             data_doc = defaultdict(list)
             inst_in_doc = doc['instances']
             for inst in inst_in_doc:
                 ret = add_instance(data_doc, inst, map_fea_to_index, features, features_dim)
                 if not ret == True:
-                    print 'Error in %s corpus in document %s: cannot find index for word %s\n', corpus, doc, ret
+                    print 'Error in %s corpus in document %s: cannot find index for word %s\n' % (corpus, doc, ret)
                     exit(0)
 
             create_pairs(inst_pairs, data_doc, inst_in_doc, doc['coreference'], map_sent_dist_index, coref_features)
